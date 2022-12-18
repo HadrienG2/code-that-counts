@@ -5,6 +5,12 @@ multilingual = false
 src = "src"
 title = "Code that counts"
 
+[build]
+extra-watch-dirs = ["counter/src", "counter/benches"]
+
+[rust]
+edition = "2021"
+
 [output.html]
 curly-quotes = true
 git-repository-url = "https://github.com/HadrienG2/code-that-counts"
