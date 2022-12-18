@@ -7,13 +7,14 @@ obviously keeps the CPU busy all the time. However, you would be wrong.
 You see, modern CPUs are superscalar, which means that they can do multiple
 things per clock cyle. In the case of my Zen 2 CPU, you can check
 [over at uops.info](https://uops.info/html-instr/INC_R64.html) that it can
-actually do four integer increments per cycle. So, how come we only get one ?
+actually do four integer increments per cycle. So, how come we only get one?
 
-Well, the CPU may only execute multiple instructions at the same time if these
-instructions are independent from each other. Here, each counter value depends
-on the previous one, so the increments are not independent. To get instruction
-level parallelism, we need to maintain multiple independent counters and spread
-the counting work across them. Let's do exactly that :
+The problem here is that the CPU may only execute multiple instructions at the
+same time if these instructions are independent from each other. But here, each
+counter value depends on the previous one, so the counter increments are not
+independent and must await each other. To get instruction level parallelism, we
+need to maintain multiple independent counters and spread the counting work
+across them like this:
 
 ```rust,no_run
 {{#include ../counter/src/lib.rs:ilp}}

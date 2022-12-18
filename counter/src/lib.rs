@@ -24,12 +24,12 @@ pub fn ilp<const WIDTH: usize>(target: u64) -> u64 {
     }
 
     // Merge accumulators using parallel reduction
-    let mut stride = WIDTH;
-    while stride > 1 {
-        stride /= 2;
+    let mut stride = WIDTH.next_power_of_two() / 2;
+    while stride > 0 {
         for i in 0..stride.min(WIDTH - stride) {
             counters[i] += counters[i + stride];
         }
+        stride /= 2;
     }
     counters[0]
 }
@@ -40,12 +40,12 @@ mod tests {
     use quickcheck::TestResult;
     use quickcheck_macros::quickcheck;
 
-    fn test_counter(target: u64, mut counter: impl FnMut(u64) -> u64) -> TestResult {
-        if target > (1 << 32) {
-            TestResult::discard()
-        } else {
-            TestResult::from_bool(counter(target) == target)
+    fn test_counter(target: u32, mut counter: impl FnMut(u64) -> u64) -> TestResult {
+        if target > 1 << 24 {
+            return TestResult::discard();
         }
+        let target = target as u64;
+        TestResult::from_bool(counter(target) == target)
     }
 
     macro_rules! test_counter {
@@ -54,7 +54,7 @@ mod tests {
         };
         (($name:ident, $imp:path)) => {
             #[quickcheck]
-            fn $name(target: u64) -> TestResult {
+            fn $name(target: u32) -> TestResult {
                 test_counter(target, $imp)
             }
         };
