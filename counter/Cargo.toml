@@ -1,0 +1,19 @@
+[package]
+name = "counter"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+bench = false
+
+[[bench]]
+name = "benchmarks"
+harness = false
+
+[dependencies]
+pessimize = { git = "https://github.com/HadrienG2/pessimize.git" }
+
+[dev-dependencies]
+criterion = { version = "0.4", default-features = false, features = ["rayon", "cargo_bench_support"] }
+quickcheck = "1"
+quickcheck_macros = "1"

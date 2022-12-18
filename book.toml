@@ -1,0 +1,16 @@
+[book]
+authors = ["Hadrien Grasland"]
+language = "en"
+multilingual = false
+src = "src"
+title = "Code that counts"
+
+[output.html]
+curly-quotes = true
+git-repository-url = "https://github.com/HadrienG2/code-that-counts"
+edit-url-template = "https://github.com/HadrienG2/code-that-counts/edit/master/{path}"
+
+[output.katex]
+
+[preprocessor.katex]
+renderers = ["html"]
