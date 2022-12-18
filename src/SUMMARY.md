@@ -4,3 +4,4 @@
 
 - [Getting started](./getting-started.md)
 - [Instruction-Level Parallelism](./ilp.md)
+- [Vectorization (WIP)](./vectorization.md)
