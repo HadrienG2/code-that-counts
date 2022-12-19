@@ -22,9 +22,3 @@ SIMD is a broad topic, so I will approach it incrementally:
   SIMD programming, and tools that can be used to handle this discrepancy.
 - And finally, I will demonstrate SIMD's sensitivity to data width and ways to
   make the most of it in the context of this toy counting problem.
-
-TODO: First basic 64-bit vectorization with SSE2, then add ILP and combination
-      with scalar units for a little extra, then add AVX via multiversion, then
-      go wider by using smaller integers in vectors with occasional merging
-      (need either slow extract loop on SSE2 16b or SSE 4.1 for conversion).
-      This could probably use sub-parts !
