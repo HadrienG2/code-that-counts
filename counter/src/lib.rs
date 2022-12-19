@@ -295,7 +295,7 @@ pub fn generic_ilp<
         }
     }
 
-    // Accumulate remaining pairs of elements
+    // Accumulate remaining SIMD vectors of elements
     let mut remainder = (target % full_width) as usize;
     while remainder >= SIMD_WIDTH {
         for simd_accumulator in simd_accumulators.iter_mut().take(remainder / SIMD_WIDTH) {

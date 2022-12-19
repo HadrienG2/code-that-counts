@@ -1,8 +1,6 @@
 # Handling hardware heterogeneity
 
-## Context
-
-So far, I've been making two assumptions:
+So far, I have been making two assumptions:
 
 - That our CPU supports SSE2 vectorization. For x86 hardware, that is quite
   reasonable as almost every CPU released since the Intel Pentium 4 in 2000

@@ -1,8 +1,6 @@
 # Getting started
 
-Let's start simple and count with the `+=` operator, since that's the way we
-increment integers in Rust, my language of choice for high-performance
-programming:
+Let's start simple and count with the `+` operator:
 
 ```rust,no_run
 {{#include ../counter/src/lib.rs:basic}}
