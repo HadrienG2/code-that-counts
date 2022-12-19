@@ -6,7 +6,7 @@
 - [Instruction-Level Parallelism](./ilp.md)
 - [SIMD](./simd.md)
     * [Basic](./simd-basics.md)
-    * [Superscalar (WIP)](./simd-ilp.md)
+    * [Superscalar](./simd-ilp.md)
     * [Portable (WIP)](./simd-portability.md)
     * [Narrow (WIP)](./simd-narrowing.md)
 - [Multithreading (WIP)](./multithreading.md)

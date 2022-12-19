@@ -1,3 +1,5 @@
+use pessimize::Pessimize;
+
 // ANCHOR: basic
 pub fn basic(target: u64) -> u64 {
     let mut current = 0;
@@ -9,7 +11,9 @@ pub fn basic(target: u64) -> u64 {
 // ANCHOR_END: basic
 
 // ANCHOR: ilp
-pub fn ilp<const WIDTH: usize>(target: u64) -> u64 {
+pub fn basic_ilp<const WIDTH: usize>(target: u64) -> u64 {
+    assert_ne!(WIDTH, 0, "No progress possible in this configuration");
+
     // Accumulate in parallel
     let mut counters = [0; WIDTH];
     for _ in 0..(target / WIDTH as u64) {
@@ -38,30 +42,294 @@ pub fn ilp<const WIDTH: usize>(target: u64) -> u64 {
 // ANCHOR: simd_basic
 pub fn simd_basic(target: u64) -> u64 {
     use safe_arch::m128i;
+    const SIMD_WIDTH: usize = 2;
 
-    // Set up counters and increments
-    let mut counters = m128i::from([0u64; 2]);
-    let increments = m128i::from([1u64; 2]);
+    // Set up SIMD counters and increment
+    let mut simd_counter = m128i::from([0u64; SIMD_WIDTH]);
+    let simd_increment = m128i::from([1u64; SIMD_WIDTH]);
 
     // Accumulate in parallel
-    for _ in 0..(target / 2) {
-        counters = pessimize::hide(safe_arch::add_i64_m128i(counters, increments));
+    for _ in 0..(target / SIMD_WIDTH as u64) {
+        simd_counter = pessimize::hide(safe_arch::add_i64_m128i(simd_counter, simd_increment));
     }
 
-    // Merge the counters
-    let counters: [u64; 2] = counters.into();
+    // Merge the SIMD counters into a scalar counter
+    let counters: [u64; SIMD_WIDTH] = simd_counter.into();
     let mut counter = counters.iter().sum();
 
     // Accumulate trailing element, if any
-    counter = pessimize::hide(counter + target % 2);
+    counter = pessimize::hide(counter + target % SIMD_WIDTH as u64);
     counter
 }
 // ANCHOR_END: simd_basic
+
+// ANCHOR: simd_ilp
+pub fn simd_ilp<const ILP_WIDTH: usize>(target: u64) -> u64 {
+    use safe_arch::m128i;
+    const SIMD_WIDTH: usize = 2;
+    assert_ne!(ILP_WIDTH, 0, "No progress possible in this configuration");
+
+    // Set up counters and increment
+    let mut simd_counters = [m128i::from([0u64; SIMD_WIDTH]); ILP_WIDTH];
+    let simd_increment = m128i::from([1u64; SIMD_WIDTH]);
+
+    // Accumulate in parallel
+    let full_width = (SIMD_WIDTH * ILP_WIDTH) as u64;
+    for _ in 0..(target / full_width) {
+        for simd_counter in &mut simd_counters {
+            *simd_counter =
+                pessimize::hide(safe_arch::add_i64_m128i(*simd_counter, simd_increment));
+        }
+    }
+
+    // Accumulate remaining pairs of elements
+    let mut remainder = (target % full_width) as usize;
+    while remainder >= SIMD_WIDTH {
+        for simd_counter in simd_counters.iter_mut().take(remainder / SIMD_WIDTH) {
+            *simd_counter =
+                pessimize::hide(safe_arch::add_i64_m128i(*simd_counter, simd_increment));
+            remainder -= SIMD_WIDTH;
+        }
+    }
+
+    // Merge SIMD accumulators using parallel reduction
+    let mut stride = ILP_WIDTH.next_power_of_two() / 2;
+    while stride > 0 {
+        for i in 0..stride.min(ILP_WIDTH - stride) {
+            simd_counters[i] =
+                safe_arch::add_i64_m128i(simd_counters[i], simd_counters[i + stride]);
+        }
+        stride /= 2;
+    }
+    let simd_counter = simd_counters[0];
+
+    // Merge the SIMD counters into a scalar counter
+    let counters: [u64; SIMD_WIDTH] = simd_counter.into();
+    let mut counter = counters.iter().sum();
+
+    // Accumulate trailing element, if any, the scalar way
+    for _ in 0..remainder {
+        counter = pessimize::hide(counter + 1);
+    }
+    counter
+}
+// ANCHOR_END: simd_ilp
+
+// ANCHOR: extreme_ilp
+pub fn extreme_ilp<
+    // Number of SIMD operations per cycle
+    const SIMD_ILP: usize,
+    // Number of scalar iterations per cycle
+    const SCALAR_ILP: usize,
+    // Number of cycles in the inner loop
+    const UNROLL_FACTOR: usize,
+    // Number of scalar instructions needed for outer loop maintenance
+    const LOOP_INSNS: usize,
+>(
+    target: u64,
+) -> u64 {
+    use safe_arch::m128i;
+    const SIMD_WIDTH: usize = 2;
+    assert_ne!(SIMD_ILP, 0, "No point in this without SIMD ops");
+    assert_ne!(SCALAR_ILP, 0, "No point in this without scalar ops");
+
+    // Set up counters and increment
+    let mut simd_counters = [m128i::from([0u64; SIMD_WIDTH]); SIMD_ILP];
+    let simd_increment = m128i::from([1u64; SIMD_WIDTH]);
+    let mut scalar_counters = [0; SCALAR_ILP];
+
+    // Accumulate in parallel
+    let unrolled_simd_ops = SIMD_WIDTH * SIMD_ILP * UNROLL_FACTOR;
+    let unrolled_scalar_ops = (SCALAR_ILP * UNROLL_FACTOR).saturating_sub(LOOP_INSNS);
+    let full_width = unrolled_simd_ops + unrolled_scalar_ops;
+    for _ in 0..(target / full_width as u64) {
+        for unroll_iter in 0..UNROLL_FACTOR {
+            for simd_counter in &mut simd_counters {
+                *simd_counter =
+                    pessimize::hide(safe_arch::add_i64_m128i(*simd_counter, simd_increment));
+            }
+            for scalar_counter in scalar_counters
+                .iter_mut()
+                .take(unrolled_scalar_ops - unroll_iter * SCALAR_ILP)
+            {
+                *scalar_counter = pessimize::hide(*scalar_counter + 1)
+            }
+        }
+    }
+
+    // Accumulate remaining elements using as much parallelism as possible
+    let mut remainder = (target % full_width as u64) as usize;
+    while remainder > SIMD_WIDTH {
+        for simd_counter in simd_counters.iter_mut().take(remainder / SIMD_WIDTH) {
+            *simd_counter =
+                pessimize::hide(safe_arch::add_i64_m128i(*simd_counter, simd_increment));
+            remainder -= SIMD_WIDTH;
+        }
+    }
+    while remainder > 0 {
+        for scalar_counter in scalar_counters.iter_mut().take(remainder) {
+            *scalar_counter = pessimize::hide(*scalar_counter + 1);
+            remainder -= 1;
+        }
+    }
+
+    // Merge accumulators using parallel reduction
+    let mut stride = (SIMD_ILP.max(SCALAR_ILP)).next_power_of_two() / 2;
+    while stride > 0 {
+        for i in 0..stride.min(SIMD_ILP.saturating_sub(stride)) {
+            simd_counters[i] =
+                safe_arch::add_i64_m128i(simd_counters[i], simd_counters[i + stride]);
+        }
+        for i in 0..stride.min(SCALAR_ILP.saturating_sub(stride)) {
+            scalar_counters[i] += scalar_counters[i + stride];
+        }
+        stride /= 2;
+    }
+    let simd_counter = simd_counters[0];
+    let mut scalar_counter = scalar_counters[0];
+
+    // Merge the SIMD counters and scalar counter into one
+    let counters: [u64; SIMD_WIDTH] = simd_counter.into();
+    scalar_counter += counters.iter().sum::<u64>();
+    scalar_counter
+}
+// ANCHOR_END: extreme_ilp
+
+// ANCHOR: Accumulator
+/// Set of SIMD_WIDTH accumulators
+pub trait SimdAccumulator<const SIMD_WIDTH: usize>: Copy + Pessimize + Sized {
+    // Set up empty accumulators
+    fn zeros() -> Self;
+
+    // Set up accumulators all set to 1
+    fn ones() -> Self;
+
+    // Merge another set of accumulators into this one
+    fn add(self, other: Self) -> Self;
+
+    // Reduce into a single counter
+    // NOTE: In future Rust with more advanced const generics, should expose
+    //       reduction to a (SIMD_WIDTH / 2)-wide accumulator
+    fn reduce(self) -> u64;
+
+    // Add one to every accumulator in the set in a manner that cannot be
+    // optimized out by the compiler
+    #[inline(always)]
+    fn increment(&mut self) {
+        *self = pessimize::hide(Self::add(*self, Self::ones()));
+    }
+
+    // Merge another accumulator into this one
+    #[inline(always)]
+    fn merge(&mut self, other: Self) {
+        *self = Self::add(*self, other);
+    }
+}
+// ANCHOR_END: Accumulator
+
+// ANCHOR: implAccumulator
+impl SimdAccumulator<1> for u64 {
+    #[inline(always)]
+    fn zeros() -> Self {
+        0
+    }
+
+    #[inline(always)]
+    fn ones() -> Self {
+        1
+    }
+
+    #[inline(always)]
+    fn add(self, other: Self) -> Self {
+        self + other
+    }
+
+    #[inline(always)]
+    fn reduce(self) -> u64 {
+        self
+    }
+}
+
+impl SimdAccumulator<2> for safe_arch::m128i {
+    #[inline(always)]
+    fn zeros() -> Self {
+        Self::from([0u64; 2])
+    }
+
+    #[inline(always)]
+    fn ones() -> Self {
+        Self::from([1u64; 2])
+    }
+
+    #[inline(always)]
+    fn add(self, other: Self) -> Self {
+        safe_arch::add_i64_m128i(self, other)
+    }
+
+    #[inline(always)]
+    fn reduce(self) -> u64 {
+        let counters: [u64; 2] = self.into();
+        counters.iter().sum()
+    }
+}
+// ANCHOR_END: implAccumulator
+
+// ANCHOR: generic_ilp
+pub fn generic_ilp<
+    const ILP_WIDTH: usize,
+    const SIMD_WIDTH: usize,
+    SimdAcc: SimdAccumulator<SIMD_WIDTH>,
+>(
+    target: u64,
+) -> u64 {
+    assert_ne!(ILP_WIDTH, 0, "No progress possible in this configuration");
+
+    // Set up counters
+    let mut simd_accumulators = [SimdAcc::zeros(); ILP_WIDTH];
+
+    // Accumulate in parallel
+    let full_width = (SIMD_WIDTH * ILP_WIDTH) as u64;
+    for _ in 0..(target / full_width) {
+        for simd_accumulator in &mut simd_accumulators {
+            simd_accumulator.increment();
+        }
+    }
+
+    // Accumulate remaining pairs of elements
+    let mut remainder = (target % full_width) as usize;
+    while remainder >= SIMD_WIDTH {
+        for simd_accumulator in simd_accumulators.iter_mut().take(remainder / SIMD_WIDTH) {
+            simd_accumulator.increment();
+            remainder -= SIMD_WIDTH;
+        }
+    }
+
+    // Merge SIMD accumulators using parallel reduction
+    let mut stride = ILP_WIDTH.next_power_of_two() / 2;
+    while stride > 0 {
+        for i in 0..stride.min(ILP_WIDTH - stride) {
+            simd_accumulators[i].merge(simd_accumulators[i + stride]);
+        }
+        stride /= 2;
+    }
+    let simd_accumulator = simd_accumulators[0];
+
+    // Merge the SIMD counters into a scalar counter
+    let mut counter = simd_accumulator.reduce();
+
+    // Accumulate trailing element, if any, the scalar way
+    for _ in 0..remainder {
+        counter.increment();
+    }
+    counter
+}
+// ANCHOR_END: generic_ilp
 
 #[cfg(test)]
 mod tests {
     use quickcheck::TestResult;
     use quickcheck_macros::quickcheck;
+    use safe_arch::m128i;
 
     fn test_counter(target: u32, mut counter: impl FnMut(u64) -> u64) -> TestResult {
         if target > 1 << 24 {
@@ -93,22 +361,35 @@ mod tests {
     //
     test_counters!(
         basic,
-        (ilp1, super::ilp::<1>),
-        (ilp2, super::ilp::<2>),
-        (ilp3, super::ilp::<3>),
-        (ilp4, super::ilp::<4>),
-        (ilp5, super::ilp::<5>),
-        (ilp6, super::ilp::<6>),
-        (ilp7, super::ilp::<7>),
-        (ilp8, super::ilp::<8>),
-        (ilp9, super::ilp::<9>),
-        (ilp10, super::ilp::<10>),
-        (ilp11, super::ilp::<11>),
-        (ilp12, super::ilp::<12>),
-        (ilp13, super::ilp::<13>),
-        (ilp14, super::ilp::<14>),
-        (ilp15, super::ilp::<15>),
-        (ilp16, super::ilp::<16>),
-        simd_basic
+        (ilp1, super::basic_ilp::<1>),
+        (ilp14, super::basic_ilp::<14>),
+        (ilp15, super::basic_ilp::<15>),
+        (ilp16, super::basic_ilp::<16>),
+        (ilp17, super::basic_ilp::<17>),
+        simd_basic,
+        (simd_ilp1, super::simd_ilp::<1>),
+        (simd_ilp9, super::simd_ilp::<9>),
+        (simd_ilp14, super::simd_ilp::<14>),
+        (simd_ilp15, super::simd_ilp::<15>),
+        (simd_ilp16, super::simd_ilp::<16>),
+        (simd_ilp17, super::simd_ilp::<17>),
+        (extreme_ilp_1p1x1, super::extreme_ilp::<1, 1, 1, 2>),
+        (extreme_ilp_2p1x1, super::extreme_ilp::<2, 1, 1, 2>),
+        (extreme_ilp_3p1x1, super::extreme_ilp::<3, 1, 1, 2>),
+        (extreme_ilp_1p2x1, super::extreme_ilp::<1, 2, 1, 2>),
+        (extreme_ilp_3p2x2, super::extreme_ilp::<3, 2, 2, 2>),
+        (extreme_ilp_3p2x3, super::extreme_ilp::<3, 2, 3, 2>),
+        (extreme_ilp_3p2x4, super::extreme_ilp::<3, 2, 4, 2>),
+        (extreme_ilp_3p2x5, super::extreme_ilp::<3, 2, 5, 2>),
+        (generic_ilp1_u64, super::generic_ilp::<1, 1, u64>),
+        (generic_ilp14_u64, super::generic_ilp::<14, 1, u64>),
+        (generic_ilp15_u64, super::generic_ilp::<15, 1, u64>),
+        (generic_ilp16_u64, super::generic_ilp::<16, 1, u64>),
+        (generic_ilp17_u64, super::generic_ilp::<17, 1, u64>),
+        (generic_ilp1_u64x2, super::generic_ilp::<1, 2, m128i>),
+        (generic_ilp14_u64x2, super::generic_ilp::<14, 2, m128i>),
+        (generic_ilp15_u64x2, super::generic_ilp::<15, 2, m128i>),
+        (generic_ilp16_u64x2, super::generic_ilp::<16, 2, m128i>),
+        (generic_ilp17_u64x2, super::generic_ilp::<17, 2, m128i>)
     );
 }

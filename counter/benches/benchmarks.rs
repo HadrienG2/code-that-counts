@@ -1,25 +1,30 @@
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use safe_arch::m128i;
 
 pub fn criterion_benchmark(c: &mut Criterion) {
     let benchmarks: &[(&str, fn(u64) -> u64)] = &[
         ("basic", counter::basic),
-        ("ilp1", counter::ilp::<1>),
-        ("ilp2", counter::ilp::<2>),
-        ("ilp3", counter::ilp::<3>),
-        // ("ilp4", counter::ilp::<4>),
-        // ("ilp5", counter::ilp::<5>),
-        // ("ilp6", counter::ilp::<6>),
-        ("ilp7", counter::ilp::<7>),
-        // ("ilp8", counter::ilp::<8>),
-        // ("ilp9", counter::ilp::<9>),
-        // ("ilp10", counter::ilp::<10>),
-        ("ilp11", counter::ilp::<11>),
-        // ("ilp12", counter::ilp::<12>),
-        // ("ilp13", counter::ilp::<13>),
-        // ("ilp14", counter::ilp::<14>),
-        ("ilp15", counter::ilp::<15>),
-        ("ilp16", counter::ilp::<16>),
+        ("ilp1", counter::basic_ilp::<1>),
+        ("ilp2", counter::basic_ilp::<2>),
+        ("ilp3", counter::basic_ilp::<3>),
+        ("ilp7", counter::basic_ilp::<7>),
+        ("ilp11", counter::basic_ilp::<11>),
+        ("ilp15", counter::basic_ilp::<15>),
+        ("ilp16", counter::basic_ilp::<16>),
         ("simd_basic", counter::simd_basic),
+        ("simd_ilp1", counter::simd_ilp::<1>),
+        ("simd_ilp2", counter::simd_ilp::<2>),
+        ("simd_ilp3", counter::simd_ilp::<3>),
+        ("simd_ilp4", counter::simd_ilp::<4>),
+        ("simd_ilp5", counter::simd_ilp::<5>),
+        ("simd_ilp6", counter::simd_ilp::<6>),
+        ("simd_ilp7", counter::simd_ilp::<7>),
+        ("simd_ilp8", counter::simd_ilp::<8>),
+        ("simd_ilp9", counter::simd_ilp::<9>),
+        ("generic_ilp1_u64", counter::generic_ilp::<1, 1, u64>),
+        ("generic_ilp15_u64", counter::generic_ilp::<15, 1, u64>),
+        ("generic_ilp1_u64x2", counter::generic_ilp::<1, 2, m128i>),
+        ("generic_ilp9_u64x2", counter::generic_ilp::<9, 2, m128i>),
     ];
     for (group, counter) in benchmarks {
         for size_pow2 in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20, 30] {
