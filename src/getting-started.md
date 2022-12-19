@@ -25,6 +25,10 @@ counting:
   counting once per CPU cycle, or a little more than 4 billion times per
   second on my CPU (4.27 to be precise).
 
+But to me, the interesting question is, how much faster can we go than this
+simple code, and at what costs (logical shortcuts, API constraints, code
+complexity and maintainability...).
+
 In the following, I'm going to assume that we are interested in optimizing
 for _asymptotic_ counting throughput when going for large counts. But I'll still
 keep track of how many iterations it takes to reach baseline performance and
