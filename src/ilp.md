@@ -1,4 +1,4 @@
-# Instruction-Level Parallelism
+# Instruction-Level Parallelism (ILP)
 
 Reaching the end of the previous chapter, you may think that the naive `for`
 loop is optimal, since it increments the counter on every clock cycle so it
@@ -7,7 +7,9 @@ obviously keeps the CPU busy all the time. However, you would be wrong.
 You see, modern CPUs are superscalar, which means that they can do multiple
 things per clock cyle. In the case of my Zen 2 CPU, you can check
 [over at uops.info](https://uops.info/html-instr/INC_R64.html) that it can
-actually do four integer increments per cycle. So, how come we only get one?
+actually do four integer increments per cycle. This is called "Instruction Level
+Parallelism", or ILP for short. The question then is, why do we not observe this
+form of parallelism in the simple counting loop?
 
 The problem here is that the CPU may only execute multiple instructions at the
 same time if these instructions are independent from each other. But here, each
