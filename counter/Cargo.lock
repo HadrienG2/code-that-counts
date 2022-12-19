@@ -108,6 +108,7 @@ dependencies = [
  "pessimize",
  "quickcheck",
  "quickcheck_macros",
+ "safe_arch",
 ]
 
 [[package]]
@@ -332,6 +333,9 @@ checksum = "9b7820b9daea5457c9f21c69448905d723fbd21136ccf521748f23fd49e723ee"
 name = "pessimize"
 version = "0.1.0"
 source = "git+https://github.com/HadrienG2/pessimize.git#6e2042241e33bf0ad931dfa4ab6bc97999360ccb"
+dependencies = [
+ "safe_arch",
+]
 
 [[package]]
 name = "proc-macro2"
@@ -435,6 +439,12 @@ name = "ryu"
 version = "1.0.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7b4b9743ed687d4b4bcedf9ff5eaa7398495ae14e61cba0a295704edbc7decde"
+
+[[package]]
+name = "safe_arch"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "794821e4ccb0d9f979512f9c1973480123f9bd62a90d74ab0f9426fcf8f4a529"
 
 [[package]]
 name = "same-file"

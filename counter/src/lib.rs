@@ -35,6 +35,29 @@ pub fn ilp<const WIDTH: usize>(target: u64) -> u64 {
 }
 // ANCHOR_END: ilp
 
+// ANCHOR: simd_basic
+pub fn simd_basic(target: u64) -> u64 {
+    use safe_arch::m128i;
+
+    // Set up counters and increments
+    let mut counters = m128i::from([0u64; 2]);
+    let increments = m128i::from([1u64; 2]);
+
+    // Accumulate in parallel
+    for _ in 0..(target / 2) {
+        counters = pessimize::hide(safe_arch::add_i64_m128i(counters, increments));
+    }
+
+    // Merge the counters
+    let counters: [u64; 2] = counters.into();
+    let mut counter = counters.iter().sum();
+
+    // Accumulate trailing element, if any
+    counter = pessimize::hide(counter + target % 2);
+    counter
+}
+// ANCHOR_END: simd_basic
+
 #[cfg(test)]
 mod tests {
     use quickcheck::TestResult;
@@ -85,6 +108,7 @@ mod tests {
         (ilp13, super::ilp::<13>),
         (ilp14, super::ilp::<14>),
         (ilp15, super::ilp::<15>),
-        (ilp16, super::ilp::<16>)
+        (ilp16, super::ilp::<16>),
+        simd_basic
     );
 }

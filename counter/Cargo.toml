@@ -11,7 +11,8 @@ name = "benchmarks"
 harness = false
 
 [dependencies]
-pessimize = { git = "https://github.com/HadrienG2/pessimize.git" }
+pessimize = { git = "https://github.com/HadrienG2/pessimize.git", features = ["safe_arch"] }
+safe_arch = "0.6"
 
 [dev-dependencies]
 criterion = { version = "0.4", default-features = false, features = ["rayon", "cargo_bench_support"] }

@@ -19,6 +19,7 @@ pub fn criterion_benchmark(c: &mut Criterion) {
         // ("ilp14", counter::ilp::<14>),
         ("ilp15", counter::ilp::<15>),
         ("ilp16", counter::ilp::<16>),
+        ("simd_basic", counter::simd_basic),
     ];
     for (group, counter) in benchmarks {
         for size_pow2 in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20, 30] {
