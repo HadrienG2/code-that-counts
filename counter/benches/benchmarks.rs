@@ -2,7 +2,7 @@ use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Through
 use safe_arch::m128i;
 
 pub fn criterion_benchmark(c: &mut Criterion) {
-    let benchmarks: &[(&str, fn(u64) -> u64)] = &[
+    let mut benchmarks: Vec<(&str, fn(u64) -> u64)> = vec![
         ("basic", counter::basic),
         ("ilp1", counter::basic_ilp::<1>),
         ("ilp14", counter::basic_ilp::<14>),
@@ -18,10 +18,18 @@ pub fn criterion_benchmark(c: &mut Criterion) {
         ("generic_ilp1_u64x2", counter::generic_ilp::<1, 2, m128i>),
         ("generic_ilp9_u64x2", counter::generic_ilp::<9, 2, m128i>),
     ];
+    #[cfg(target_feature = "sse2")]
+    {
+        benchmarks.push(("multiversion_sse2", counter::multiversion_sse2));
+    }
+    #[cfg(target_feature = "avx2")]
+    {
+        benchmarks.push(("multiversion_avx2", counter::multiversion_avx2));
+    }
     for (group, counter) in benchmarks {
         for size_pow2 in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20, 30] {
             let size = 1 << size_pow2;
-            let mut group = c.benchmark_group(*group);
+            let mut group = c.benchmark_group(group);
             group.throughput(Throughput::Elements(size));
             group.bench_with_input(BenchmarkId::from_parameter(size), &size, |b, &size| {
                 b.iter(|| counter(pessimize::hide(size)));

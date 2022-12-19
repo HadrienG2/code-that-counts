@@ -7,7 +7,7 @@
 - [SIMD](./simd.md)
     * [Basic](./simd-basics.md)
     * [Superscalar](./simd-ilp.md)
-    * [Portable (WIP)](./simd-portability.md)
+    * [Portable](./simd-portability.md)
     * [Narrow (WIP)](./simd-narrowing.md)
 - [Multithreading (WIP)](./multithreading.md)
 

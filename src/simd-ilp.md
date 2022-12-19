@@ -126,6 +126,5 @@ our previous `_ilp` implementations:
 {{#include ../counter/src/lib.rs:generic_ilp}}
 ```
 
-With this, we have a generic ILP counting implementation that can work with
-every counter that we've used in previous sections as well as those we're going
-to introduce in the future.
+Then we can stop worrying about ILP and offload that concern to `generic_ilp`,
+only focusing our later efforts on perfecting our usage of SIMD.

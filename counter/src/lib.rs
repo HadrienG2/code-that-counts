@@ -325,6 +325,62 @@ pub fn generic_ilp<
 }
 // ANCHOR_END: generic_ilp
 
+// ANCHOR: multiversion_sse2
+#[cfg(target_feature = "sse2")]
+pub fn multiversion_sse2(target: u64) -> u64 {
+    generic_ilp::<9, 2, safe_arch::m128i>(target)
+}
+
+#[cfg(not(target_feature = "sse2"))]
+pub fn multiversion_sse2(target: u64) -> u64 {
+    generic_ilp::<15, 1, u64>(target)
+}
+// ANCHOR_END: multiversion_sse2
+
+// ANCHOR: avx2
+#[cfg(target_feature = "avx2")]
+impl SimdAccumulator<4> for safe_arch::m256i {
+    #[inline(always)]
+    fn zeros() -> Self {
+        Self::from([0u64; 4])
+    }
+
+    #[inline(always)]
+    fn ones() -> Self {
+        Self::from([1u64; 4])
+    }
+
+    #[inline(always)]
+    fn add(self, other: Self) -> Self {
+        safe_arch::add_i64_m256i(self, other)
+    }
+
+    #[inline(always)]
+    fn reduce(self) -> u64 {
+        let half_1 = safe_arch::extract_m128i_m256i::<0>(self);
+        let half_2 = safe_arch::extract_m128i_m256i::<1>(self);
+        let half = safe_arch::add_i64_m128i(half_1, half_2);
+        let counters: [u64; 2] = half.into();
+        counters.iter().sum()
+    }
+}
+
+#[cfg(target_feature = "avx2")]
+pub fn multiversion_avx2(target: u64) -> u64 {
+    generic_ilp::<9, 4, safe_arch::m256i>(target)
+}
+
+#[cfg(all(not(target_feature = "avx2"), target_feature = "sse2"))]
+pub fn multiversion_avx2(target: u64) -> u64 {
+    generic_ilp::<9, 2, safe_arch::m128i>(target)
+}
+
+#[cfg(not(target_feature = "sse2"))]
+pub fn multiversion_avx2(target: u64) -> u64 {
+    generic_ilp::<15, 1, u64>(target)
+}
+// ANCHOR_END: avx2
+
 #[cfg(test)]
 mod tests {
     use quickcheck::TestResult;
@@ -369,7 +425,6 @@ mod tests {
         simd_basic,
         (simd_ilp1, super::simd_ilp::<1>),
         (simd_ilp9, super::simd_ilp::<9>),
-        (simd_ilp14, super::simd_ilp::<14>),
         (simd_ilp15, super::simd_ilp::<15>),
         (simd_ilp16, super::simd_ilp::<16>),
         (simd_ilp17, super::simd_ilp::<17>),
@@ -387,9 +442,13 @@ mod tests {
         (generic_ilp16_u64, super::generic_ilp::<16, 1, u64>),
         (generic_ilp17_u64, super::generic_ilp::<17, 1, u64>),
         (generic_ilp1_u64x2, super::generic_ilp::<1, 2, m128i>),
-        (generic_ilp14_u64x2, super::generic_ilp::<14, 2, m128i>),
+        (generic_ilp9_u64x2, super::generic_ilp::<9, 2, m128i>),
         (generic_ilp15_u64x2, super::generic_ilp::<15, 2, m128i>),
         (generic_ilp16_u64x2, super::generic_ilp::<16, 2, m128i>),
-        (generic_ilp17_u64x2, super::generic_ilp::<17, 2, m128i>)
+        (generic_ilp17_u64x2, super::generic_ilp::<17, 2, m128i>),
+        multiversion_sse2
     );
+
+    #[cfg(target_feature = "avx2")]
+    test_counter!(multiversion_sse2);
 }

@@ -9,8 +9,9 @@ Let's start with a simple vector loop that uses the SSE2 instruction set:
 You may notice strong similarities with the instruction-level parallelism
 approach that I used earlier, except this time instead of nice arrays I am
 using a weird `m128i` x86-specific type that comes with its own weird array of
-operations. And that is in spite of me using the `safe_arch` Rust crate, which
-already has friendlier API conventions than the underlying hardware intrinsics.
+operations. And that is in spite of me using the
+[`safe_arch`](https://docs.rs/safe_arch/) Rust crate, which already has
+friendlier API conventions than the underlying hardware intrinsics.
 
 If you can bear with the weirdness, however, this approach works slightly better
 than two-way instruction level parallelism by virtue of generating a simpler
