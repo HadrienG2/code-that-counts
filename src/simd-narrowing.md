@@ -48,7 +48,7 @@ Good thing the `SimdAccumulator` trait was designed with this in mind!
 
 TODO: Need to extract the equivalent of u32::MAX above and expose it. This
       should be possible without adding anything to the implementation, just by
-      reasoning based on `mem::size_of::<Self>()` and `SIMD_WIDTH`.
+      reasoning based on `mem::size_of::<T>()`.
 
 TODO: Reduce will need a lot of care to combine high speed with overflow
       avoidance. Extracting array-reduce from generic_ilp might help. Also,

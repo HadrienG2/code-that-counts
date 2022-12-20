@@ -106,12 +106,11 @@ trait...
 {{#include ../counter/src/lib.rs:Accumulator}}
 ```
 
-We will later come back to why this SIMD_WIDTH is a generic parameter of this
-trait, as opposed to an associated const. For now, it is sufficient to say that
-we may want to implement it multiple times for a single type with different
-values of SIMD_WIDTH.
+While it has a slight code complexity now, parametrizing this trait over the
+inner integer type will later allow us to do SIMD operations with different
+integer widths.
 
-In any case, this trait can be trivially implemented for both our initial `u64`
+For now, this trait can be trivially implemented for both our initial `u64`
 scalar counter and our new `m128i` SIMD counter as follows...
 
 ```rust,no_run

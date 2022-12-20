@@ -196,30 +196,31 @@ pub fn extreme_ilp<
 // ANCHOR_END: extreme_ilp
 
 // ANCHOR: Accumulator
-/// Set of SIMD_WIDTH accumulators
-pub trait SimdAccumulator<const SIMD_WIDTH: usize>: Copy + Pessimize + Sized {
-    // Set up empty accumulators
+/// Set of integer counters of type T with SIMD semantics
+pub trait SimdAccumulator<T>: Copy + Pessimize + Sized {
+    /// Number of inner accumulators
+    const WIDTH: usize = std::mem::size_of::<Self>() / std::mem::size_of::<T>();
+
+    /// Set up empty accumulators
     fn zeros() -> Self;
 
-    // Set up accumulators all set to 1
+    /// Set up accumulators all set to 1
     fn ones() -> Self;
 
-    // Merge another set of accumulators into this one
+    /// Merge another set of accumulators into this one
     fn add(self, other: Self) -> Self;
 
-    // Reduce into a single counter
-    // NOTE: In future Rust with more advanced const generics, should expose
-    //       reduction to a (SIMD_WIDTH / 2)-wide accumulator
+    /// Reduce into a 64-bit counter
     fn reduce(self) -> u64;
 
-    // Add one to every accumulator in the set in a manner that cannot be
-    // optimized out by the compiler
+    /// Add one to every accumulator in the set in a manner that cannot be
+    /// optimized out by the compiler
     #[inline(always)]
     fn increment(&mut self) {
         *self = pessimize::hide(Self::add(*self, Self::ones()));
     }
 
-    // Merge another accumulator into this one
+    /// Merge another accumulator into this one
     #[inline(always)]
     fn merge(&mut self, other: Self) {
         *self = Self::add(*self, other);
@@ -228,7 +229,7 @@ pub trait SimdAccumulator<const SIMD_WIDTH: usize>: Copy + Pessimize + Sized {
 // ANCHOR_END: Accumulator
 
 // ANCHOR: implAccumulator
-impl SimdAccumulator<1> for u64 {
+impl SimdAccumulator<u64> for u64 {
     #[inline(always)]
     fn zeros() -> Self {
         0
@@ -250,15 +251,15 @@ impl SimdAccumulator<1> for u64 {
     }
 }
 
-impl SimdAccumulator<2> for safe_arch::m128i {
+impl SimdAccumulator<u64> for safe_arch::m128i {
     #[inline(always)]
     fn zeros() -> Self {
-        Self::from([0u64; 2])
+        Self::from([0u64; Self::WIDTH])
     }
 
     #[inline(always)]
     fn ones() -> Self {
-        Self::from([1u64; 2])
+        Self::from([1u64; Self::WIDTH])
     }
 
     #[inline(always)]
@@ -268,27 +269,23 @@ impl SimdAccumulator<2> for safe_arch::m128i {
 
     #[inline(always)]
     fn reduce(self) -> u64 {
-        let counters: [u64; 2] = self.into();
+        let counters: [u64; Self::WIDTH] = self.into();
         counters.iter().sum()
     }
 }
 // ANCHOR_END: implAccumulator
 
 // ANCHOR: generic_ilp
-pub fn generic_ilp<
-    const ILP_WIDTH: usize,
-    const SIMD_WIDTH: usize,
-    SimdAcc: SimdAccumulator<SIMD_WIDTH>,
->(
+pub fn generic_ilp<const ILP_WIDTH: usize, Counter, Simd: SimdAccumulator<Counter>>(
     target: u64,
 ) -> u64 {
     assert_ne!(ILP_WIDTH, 0, "No progress possible in this configuration");
 
     // Set up counters
-    let mut simd_accumulators = [SimdAcc::zeros(); ILP_WIDTH];
+    let mut simd_accumulators = [Simd::zeros(); ILP_WIDTH];
 
     // Accumulate in parallel
-    let full_width = (SIMD_WIDTH * ILP_WIDTH) as u64;
+    let full_width = (Simd::WIDTH * ILP_WIDTH) as u64;
     for _ in 0..(target / full_width) {
         for simd_accumulator in &mut simd_accumulators {
             simd_accumulator.increment();
@@ -297,10 +294,10 @@ pub fn generic_ilp<
 
     // Accumulate remaining SIMD vectors of elements
     let mut remainder = (target % full_width) as usize;
-    while remainder >= SIMD_WIDTH {
-        for simd_accumulator in simd_accumulators.iter_mut().take(remainder / SIMD_WIDTH) {
+    while remainder >= Simd::WIDTH {
+        for simd_accumulator in simd_accumulators.iter_mut().take(remainder / Simd::WIDTH) {
             simd_accumulator.increment();
-            remainder -= SIMD_WIDTH;
+            remainder -= Simd::WIDTH;
         }
     }
 
@@ -328,26 +325,26 @@ pub fn generic_ilp<
 // ANCHOR: multiversion_sse2
 #[cfg(target_feature = "sse2")]
 pub fn multiversion_sse2(target: u64) -> u64 {
-    generic_ilp::<9, 2, safe_arch::m128i>(target)
+    generic_ilp::<9, u64, safe_arch::m128i>(target)
 }
 
 #[cfg(not(target_feature = "sse2"))]
 pub fn multiversion_sse2(target: u64) -> u64 {
-    generic_ilp::<15, 1, u64>(target)
+    generic_ilp::<15, u64, u64>(target)
 }
 // ANCHOR_END: multiversion_sse2
 
 // ANCHOR: avx2
 #[cfg(target_feature = "avx2")]
-impl SimdAccumulator<4> for safe_arch::m256i {
+impl SimdAccumulator<u64> for safe_arch::m256i {
     #[inline(always)]
     fn zeros() -> Self {
-        Self::from([0u64; 4])
+        Self::from([0u64; Self::WIDTH])
     }
 
     #[inline(always)]
     fn ones() -> Self {
-        Self::from([1u64; 4])
+        Self::from([1u64; Self::WIDTH])
     }
 
     #[inline(always)]
@@ -360,24 +357,24 @@ impl SimdAccumulator<4> for safe_arch::m256i {
         use safe_arch::m128i;
         let mut half = safe_arch::extract_m128i_m256i::<0>(self);
         let half2 = safe_arch::extract_m128i_m256i::<1>(self);
-        <m128i as SimdAccumulator<2>>::merge(&mut half, half2);
-        <m128i as SimdAccumulator<2>>::reduce(half)
+        <m128i as SimdAccumulator<u64>>::merge(&mut half, half2);
+        <m128i as SimdAccumulator<u64>>::reduce(half)
     }
 }
 
 #[cfg(target_feature = "avx2")]
 pub fn multiversion_avx2(target: u64) -> u64 {
-    generic_ilp::<9, 4, safe_arch::m256i>(target)
+    generic_ilp::<9, u64, safe_arch::m256i>(target)
 }
 
 #[cfg(all(not(target_feature = "avx2"), target_feature = "sse2"))]
 pub fn multiversion_avx2(target: u64) -> u64 {
-    generic_ilp::<9, 2, safe_arch::m128i>(target)
+    generic_ilp::<9, u64, safe_arch::m128i>(target)
 }
 
 #[cfg(not(target_feature = "sse2"))]
 pub fn multiversion_avx2(target: u64) -> u64 {
-    generic_ilp::<15, 1, u64>(target)
+    generic_ilp::<15, u64, u64>(target)
 }
 // ANCHOR_END: avx2
 
