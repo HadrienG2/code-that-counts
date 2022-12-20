@@ -100,5 +100,6 @@ TODO: Roll out an U8Accumulator that contains an [u8x32; ILP_WIDTH], and
       into i16x16 that itself auto-spills to [u64; ILP_WIDTH]. By calling a
       method, you extract a merged [u64; ILP_WIDTH].
 
-TODO: Discuss throughput at lower iteration counts.
+TODO: Discuss throughput at lower iteration counts for each accumulator size
+      vs previous best multiversion_avx2 solution.
 
