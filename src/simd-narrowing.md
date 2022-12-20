@@ -43,7 +43,7 @@ expensive, so it's not absolutely certain that, say, 8-bit integers will be the
 fastest choice.
 
 
-## Narrower SimdAccumulators
+## Narrow SimdAccumulators
 
 Since the SimdAccumulator trait was designed for it, supporting narrower
 integers is, on its side, just a matter of going through the `safe_arch`
@@ -53,7 +53,8 @@ compilation directives:
 TODO
 
 
-## Extending SimdAccumulator
+
+## TODO
 
 TODO: Need to extract the equivalent of u32::MAX above and expose it. This
       should be possible without adding anything to the implementation, just by

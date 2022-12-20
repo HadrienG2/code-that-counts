@@ -204,11 +204,20 @@ pub trait SimdAccumulator<Counter>: Copy + Eq + Pessimize + Sized {
     /// Number of inner accumulators
     const WIDTH: usize = std::mem::size_of::<Self>() / std::mem::size_of::<Counter>();
 
-    /// Set up empty accumulators
-    fn zeros() -> Self;
+    /// Set up accumulators, all initialized to 0 or 1
+    fn identity(one: bool) -> Self;
 
-    /// Set up accumulators all set to 1
-    fn ones() -> Self;
+    /// Set up accumulators initialized to 0
+    #[inline(always)]
+    fn zeros() -> Self {
+        Self::identity(false)
+    }
+
+    /// Set up accumulators initialized to 1
+    #[inline(always)]
+    fn ones() -> Self {
+        Self::identity(true)
+    }
 
     /// Merge another set of accumulators into this one
     fn add(self, other: Self) -> Self;
@@ -251,13 +260,8 @@ pub trait SimdAccumulator<Counter>: Copy + Eq + Pessimize + Sized {
 // ANCHOR: implAccumulator
 impl SimdAccumulator<u64> for safe_arch::m128i {
     #[inline(always)]
-    fn zeros() -> Self {
-        Self::from([0u64; Self::WIDTH])
-    }
-
-    #[inline(always)]
-    fn ones() -> Self {
-        Self::from([1u64; Self::WIDTH])
+    fn identity(one: bool) -> Self {
+        Self::from([one as u64; <Self as SimdAccumulator<u64>>::WIDTH])
     }
 
     #[inline(always)]
@@ -277,13 +281,8 @@ impl SimdAccumulator<u64> for safe_arch::m128i {
 
 impl SimdAccumulator<u64> for u64 {
     #[inline(always)]
-    fn zeros() -> Self {
-        0
-    }
-
-    #[inline(always)]
-    fn ones() -> Self {
-        1
+    fn identity(one: bool) -> Self {
+        one as u64
     }
 
     #[inline(always)]
@@ -368,13 +367,8 @@ pub fn multiversion_sse2(target: u64) -> u64 {
 #[cfg(target_feature = "avx2")]
 impl SimdAccumulator<u64> for safe_arch::m256i {
     #[inline(always)]
-    fn zeros() -> Self {
-        Self::from([0u64; Self::WIDTH])
-    }
-
-    #[inline(always)]
-    fn ones() -> Self {
-        Self::from([1u64; Self::WIDTH])
+    fn identity(one: bool) -> Self {
+        Self::from([one as u64; <Self as SimdAccumulator<u64>>::WIDTH])
     }
 
     #[inline(always)]
