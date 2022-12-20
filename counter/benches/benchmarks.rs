@@ -13,10 +13,10 @@ pub fn criterion_benchmark(c: &mut Criterion) {
         ("simd_ilp7", counter::simd_ilp::<7>),
         ("simd_ilp8", counter::simd_ilp::<8>),
         ("simd_ilp9", counter::simd_ilp::<9>),
-        ("generic_ilp1_u64", counter::generic_ilp::<1, 1, u64>),
-        ("generic_ilp15_u64", counter::generic_ilp::<15, 1, u64>),
-        ("generic_ilp1_u64x2", counter::generic_ilp::<1, 2, m128i>),
-        ("generic_ilp9_u64x2", counter::generic_ilp::<9, 2, m128i>),
+        ("generic_ilp1_u64", counter::generic_ilp_u64::<1, u64>),
+        ("generic_ilp15_u64", counter::generic_ilp_u64::<15, u64>),
+        ("generic_ilp1_u64x2", counter::generic_ilp_u64::<1, m128i>),
+        ("generic_ilp9_u64x2", counter::generic_ilp_u64::<9, m128i>),
     ];
     #[cfg(target_feature = "sse2")]
     {

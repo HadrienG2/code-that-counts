@@ -91,7 +91,7 @@ to let it go and stick with the simpler SIMD + ILP approach for the remainder of
 the current version of this book.
 
 
-## Consolidation
+## Refactoring
 
 Speaking of keeping code understandable, before we scale this code up further,
 we need to do something about the cognitive complexity of the SIMD + ILP
@@ -99,31 +99,41 @@ solution. While less scary than the hybrid scalar + SIMD version, this code
 still feels too complex, and we're far from being done with it.
 
 To address this, let me separate concerns of SIMD computation and
-instruction-level parallelism a bit. For SIMD, I'll introduce the following
-trait...
+instruction-level parallelism a bit. First, for SIMD abstraction purposes, let's
+introduce the following trait.
 
 ```rust,no_run
 {{#include ../counter/src/lib.rs:Accumulator}}
 ```
 
-While it has a slight code complexity now, parametrizing this trait over the
-inner integer type will later allow us to do SIMD operations with different
-integer widths.
+While mostly straightfoward, this trait has a number of generic knobs that we do
+not need yet but are going to use later on in this book. Let's go through them
+briefly:
 
-For now, this trait can be trivially implemented for both our initial `u64`
-scalar counter and our new `m128i` SIMD counter as follows...
+- The trait is parametrized on an inner integer type, to that we can use all of
+  the integer widths supported by a given SIMD vector type later on.
+- Reduction from a SIMD vector of counters to a single 64-bit integer is
+  performed through a series of recursive steps:
+    * First, we double inner integer size until we reach 64-bits by converting
+      each half of the SIMD vector to a an integer size twice as wide and
+      merging the resulting SIMD vectors.
+    * Then we recursively split the eventual SIMD vector of 64-bit integers in
+      halves and merge the halves until we get to a single 64-bit integer.
+
+The trait can be easily implemented for both our initial `u64` scalar counter
+and our new `m128i` SIMD counter as follows...
 
 ```rust,no_run
 {{#include ../counter/src/lib.rs:implAccumulator}}
 ```
 
-...and then we can write a generic SIMD + ILP implementation that can work with
-terms of any implementation of this trait, which effectively supersedes all of
-our previous `_ilp` implementations:
+...and then we can write a generic SIMD + ILP implementation that can work in
+terms of any implementation of `SimdAccumulator<u64>`, superseding all of our
+previous `_ilp` implementations:
 
 ```rust,no_run
 {{#include ../counter/src/lib.rs:generic_ilp}}
 ```
 
-Then we can stop worrying about ILP and offload that concern to `generic_ilp`,
-only focusing our later efforts on perfecting our usage of SIMD.
+With that, we can stop worrying about ILP for now and offload that concern to
+`generic_ilp_u64`, keeping our focus on perfecting our usage of SIMD.

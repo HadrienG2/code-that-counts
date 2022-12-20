@@ -1,4 +1,4 @@
-# Smaller is better
+# When smaller is better
 
 At this stage, we are computing 64-bit additions as fast as the CPU can, so you
 might expect that we have also reached peak counting throughput. But that is
@@ -37,11 +37,10 @@ while remainder > 0 {
 ```
 
 ...but with native-width SIMD, instruction-level parallelism, and ideally a
-choice of counter width as well since there's a tradeoff there (small counters
-count more quickly but merge more often) so it's not absolutely certain that,
-say, 8-bit integers will be the fastest choice.
-
-Good thing the `SimdAccumulator` trait was designed with this in mind!
+choice of counter width as well since there's a potential tradeoff there: small
+counters count more quickly but merge more often, and merging might be
+expensive, so it's not absolutely certain that, say, 8-bit integers will be the
+fastest choice.
 
 
 ## Extending SimdAccumulator

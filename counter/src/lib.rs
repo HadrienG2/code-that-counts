@@ -196,10 +196,10 @@ pub fn extreme_ilp<
 // ANCHOR_END: extreme_ilp
 
 // ANCHOR: Accumulator
-/// Set of integer counters of type T with SIMD semantics
-pub trait SimdAccumulator<T>: Copy + Pessimize + Sized {
+/// Set of integer counters with SIMD semantics
+pub trait SimdAccumulator<Counter>: Copy + Eq + Pessimize + Sized {
     /// Number of inner accumulators
-    const WIDTH: usize = std::mem::size_of::<Self>() / std::mem::size_of::<T>();
+    const WIDTH: usize = std::mem::size_of::<Self>() / std::mem::size_of::<Counter>();
 
     /// Set up empty accumulators
     fn zeros() -> Self;
@@ -209,9 +209,6 @@ pub trait SimdAccumulator<T>: Copy + Pessimize + Sized {
 
     /// Merge another set of accumulators into this one
     fn add(self, other: Self) -> Self;
-
-    /// Reduce into a 64-bit counter
-    fn reduce(self) -> u64;
 
     /// Add one to every accumulator in the set in a manner that cannot be
     /// optimized out by the compiler
@@ -224,6 +221,25 @@ pub trait SimdAccumulator<T>: Copy + Pessimize + Sized {
     #[inline(always)]
     fn merge(&mut self, other: Self) {
         *self = Self::add(*self, other);
+    }
+
+    /// Doubles the size of Counter if it's not u64 yet, else stays at u64
+    type ReducedCounter;
+
+    /// Goes to another SimdAccumulator type that is half as wide if Counter is
+    /// u64 and WIDTH is not yet 1, else stays at Self.
+    type ReducedAccumulator: SimdAccumulator<Self::ReducedCounter>;
+
+    /// Go to the next step down the reduction pipeline
+    fn reduce_step(self) -> [Self::ReducedAccumulator; 2];
+
+    /// Reduce all the way to a 64-bit counter
+    /// Must be specialized to the identity function for u64 scalars
+    #[inline(always)]
+    fn reduce(self) -> u64 {
+        let [mut half, half2] = self.reduce_step();
+        half.merge(half2);
+        half.reduce()
     }
 }
 // ANCHOR_END: Accumulator
@@ -245,6 +261,15 @@ impl SimdAccumulator<u64> for u64 {
         self + other
     }
 
+    // Scalar u64 is the end of the reduction recursion
+    type ReducedCounter = u64;
+    type ReducedAccumulator = u64;
+    //
+    #[inline(always)]
+    fn reduce_step(self) -> [Self::ReducedAccumulator; 2] {
+        [self, 0]
+    }
+    //
     #[inline(always)]
     fn reduce(self) -> u64 {
         self
@@ -267,18 +292,19 @@ impl SimdAccumulator<u64> for safe_arch::m128i {
         safe_arch::add_i64_m128i(self, other)
     }
 
+    // SSE vectors of 64-bit integers reduce to 64-bit integers
+    type ReducedCounter = u64;
+    type ReducedAccumulator = u64;
+    //
     #[inline(always)]
-    fn reduce(self) -> u64 {
-        let counters: [u64; Self::WIDTH] = self.into();
-        counters.iter().sum()
+    fn reduce_step(self) -> [Self::ReducedAccumulator; 2] {
+        self.into()
     }
 }
 // ANCHOR_END: implAccumulator
 
 // ANCHOR: generic_ilp
-pub fn generic_ilp<const ILP_WIDTH: usize, Counter, Simd: SimdAccumulator<Counter>>(
-    target: u64,
-) -> u64 {
+pub fn generic_ilp_u64<const ILP_WIDTH: usize, Simd: SimdAccumulator<u64>>(target: u64) -> u64 {
     assert_ne!(ILP_WIDTH, 0, "No progress possible in this configuration");
 
     // Set up counters
@@ -325,12 +351,12 @@ pub fn generic_ilp<const ILP_WIDTH: usize, Counter, Simd: SimdAccumulator<Counte
 // ANCHOR: multiversion_sse2
 #[cfg(target_feature = "sse2")]
 pub fn multiversion_sse2(target: u64) -> u64 {
-    generic_ilp::<9, u64, safe_arch::m128i>(target)
+    generic_ilp_u64::<9, safe_arch::m128i>(target)
 }
 
 #[cfg(not(target_feature = "sse2"))]
 pub fn multiversion_sse2(target: u64) -> u64 {
-    generic_ilp::<15, u64, u64>(target)
+    generic_ilp_u64::<15, u64>(target)
 }
 // ANCHOR_END: multiversion_sse2
 
@@ -352,29 +378,32 @@ impl SimdAccumulator<u64> for safe_arch::m256i {
         safe_arch::add_i64_m256i(self, other)
     }
 
+    // AVX vectors of 64-bit integers reduce to SSE vectors of 64-bit integers
+    type ReducedCounter = u64;
+    type ReducedAccumulator = safe_arch::m128i;
+    //
     #[inline(always)]
-    fn reduce(self) -> u64 {
-        use safe_arch::m128i;
-        let mut half = safe_arch::extract_m128i_m256i::<0>(self);
-        let half2 = safe_arch::extract_m128i_m256i::<1>(self);
-        <m128i as SimdAccumulator<u64>>::merge(&mut half, half2);
-        <m128i as SimdAccumulator<u64>>::reduce(half)
+    fn reduce_step(self) -> [Self::ReducedAccumulator; 2] {
+        [
+            safe_arch::extract_m128i_m256i::<0>(self),
+            safe_arch::extract_m128i_m256i::<1>(self),
+        ]
     }
 }
 
 #[cfg(target_feature = "avx2")]
 pub fn multiversion_avx2(target: u64) -> u64 {
-    generic_ilp::<9, u64, safe_arch::m256i>(target)
+    generic_ilp_u64::<9, safe_arch::m256i>(target)
 }
 
 #[cfg(all(not(target_feature = "avx2"), target_feature = "sse2"))]
 pub fn multiversion_avx2(target: u64) -> u64 {
-    generic_ilp::<9, u64, safe_arch::m128i>(target)
+    generic_ilp_u64::<9, safe_arch::m128i>(target)
 }
 
 #[cfg(not(target_feature = "sse2"))]
 pub fn multiversion_avx2(target: u64) -> u64 {
-    generic_ilp::<15, u64, u64>(target)
+    generic_ilp_u64::<15, u64>(target)
 }
 // ANCHOR_END: avx2
 
@@ -433,16 +462,16 @@ mod tests {
         (extreme_ilp_3p2x3, super::extreme_ilp::<3, 2, 3, 2>),
         (extreme_ilp_3p2x4, super::extreme_ilp::<3, 2, 4, 2>),
         (extreme_ilp_3p2x5, super::extreme_ilp::<3, 2, 5, 2>),
-        (generic_ilp1_u64, super::generic_ilp::<1, 1, u64>),
-        (generic_ilp14_u64, super::generic_ilp::<14, 1, u64>),
-        (generic_ilp15_u64, super::generic_ilp::<15, 1, u64>),
-        (generic_ilp16_u64, super::generic_ilp::<16, 1, u64>),
-        (generic_ilp17_u64, super::generic_ilp::<17, 1, u64>),
-        (generic_ilp1_u64x2, super::generic_ilp::<1, 2, m128i>),
-        (generic_ilp9_u64x2, super::generic_ilp::<9, 2, m128i>),
-        (generic_ilp15_u64x2, super::generic_ilp::<15, 2, m128i>),
-        (generic_ilp16_u64x2, super::generic_ilp::<16, 2, m128i>),
-        (generic_ilp17_u64x2, super::generic_ilp::<17, 2, m128i>),
+        (generic_ilp1_u64, super::generic_ilp_u64::<1, u64>),
+        (generic_ilp14_u64, super::generic_ilp_u64::<14, u64>),
+        (generic_ilp15_u64, super::generic_ilp_u64::<15, u64>),
+        (generic_ilp16_u64, super::generic_ilp_u64::<16, u64>),
+        (generic_ilp17_u64, super::generic_ilp_u64::<17, u64>),
+        (generic_ilp1_u64x2, super::generic_ilp_u64::<1, m128i>),
+        (generic_ilp9_u64x2, super::generic_ilp_u64::<9, m128i>),
+        (generic_ilp15_u64x2, super::generic_ilp_u64::<15, m128i>),
+        (generic_ilp16_u64x2, super::generic_ilp_u64::<16, m128i>),
+        (generic_ilp17_u64x2, super::generic_ilp_u64::<17, m128i>),
         multiversion_sse2
     );
 
