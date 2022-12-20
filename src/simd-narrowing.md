@@ -43,38 +43,59 @@ expensive, so it's not absolutely certain that, say, 8-bit integers will be the
 fastest choice.
 
 
-## Narrow SimdAccumulators
+## Narrow SIMD accumulators
 
 Since the SimdAccumulator trait was designed for it, supporting narrower
 integers is, on its side, just a matter of going through the `safe_arch`
 documentation and filling in the right methods with appropriate conditional
-compilation directives:
+compilation directives.
 
-TODO
+Here I will do it for AVX vectors only, since that's all I need for optimal
+performance on Zen 2 and other modern x86 CPUs. But hopefully you can easily see
+how the general approach would extend to SSE and non-x86 vector instruction sets.
+
+```rust,no_run
+{{#include ../counter/src/lib.rs:narrow_SimdAccumulator}}
+```
 
 
+## Simple full counter implementation
 
-## TODO
+As currently written, `generic_ilp_u64` will only reliably work with 64-bit
+accumulators. Narrower accumulators would overflow for larger values of
+`target`. To avoid this, we need to regularly spill into larger accumulators as
+outlined at the beginning of this chapter.
 
-TODO: Need to extract the equivalent of u32::MAX above and expose it. This
-      should be possible without adding anything to the implementation, just by
-      reasoning based on `mem::size_of::<T>()`.
+A simple if imperfect way to do so is to use the existing SimdAccumulator
+facilities to reduce our full narrow SIMD accumulators all the way to u64
+integers, then integrate these results into a set of global u64 accumulators,
+every time a narrow integer overflow would happen:
 
-TODO: Reduce will need a lot of care to combine high speed with overflow
-      avoidance. Extracting array-reduce from generic_ilp might help. Also,
-      could it be worthwhile to do a full reduction tree with 8-bit vectors
-      spilling into 16-bit vectors, which spill into 32-bit vectors, which spill
-      into 64-bit vectors ? It certainly has the potential to reduce
-      merging/reduction overhead and thus make small integers more attractive...
+```rust,no_run
+{{#include ../counter/src/lib.rs:generic_ilp_simple}}
+```
 
-      What if I actually could have a type ReduceResult in SimdAccumulator that
-      reduces to either an SIMD type of the same size but twice the integer
-      width, or the next narrower SIMD type if we're already at u64, and
-      eventually u64 ? And then redesign generic_ilp so it recursively calls
-      SimdAccumulator::reduce until it gets an u64 ?
+...and if we test this implementation, we see that each halving of the counter
+width doubles our throughput, until we reach u8 integers and there we only
+improve over u16 integers by a factor of 1.7 because we merge every 255
+increments and the merging overhead starts to become noticeable.
 
-      Or maybe a type ReductionTree that does the recursive work internally ?
-      This will definitely need some extra code iterations before I do the
-      write-up!
+Now, improving by a factor of 6.7x overall is already nice, but if we want this
+technique to provide the 8x speedup over the 64-bit SIMD version that it
+theoretically allows for, then we need to reduce the overhead of merging. And
+the obvious way to do that is to refrain from reducing narrow SIMD accumulators
+all the way to u64 integers when spilling to wider SIMD accumulators would
+suffice.
 
-TODO: ...and then continue through implementation...
+And along the way, I'll also extract some complexity out of the full counter
+implementation, as it starts to pack too much complexity into a single function
+for my taste again.
+
+
+## Reaching peak asymptotic throughput
+
+TODO: Roll out an U8Accumulator that contains an [u8x32; ILP_WIDTH], and
+      [i16x16; ILP_WIDTH] and an [u64; ILP_WIDTH] as well as two u8 counters.
+      You can increment it and it increments into the u8x32, with auto-spill
+      into i16x16 that itself auto-spills to [u64; ILP_WIDTH]. By calling a
+      method, you extract an [u64; ILP_WIDTH], aka U64Accumulator

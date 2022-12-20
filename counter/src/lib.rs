@@ -394,16 +394,181 @@ pub fn multiversion_avx2(target: u64) -> u64 {
     generic_ilp_u64::<9, safe_arch::m256i>(target)
 }
 
-#[cfg(all(not(target_feature = "avx2"), target_feature = "sse2"))]
+#[cfg(not(target_feature = "avx2"))]
 pub fn multiversion_avx2(target: u64) -> u64 {
-    generic_ilp_u64::<9, safe_arch::m128i>(target)
-}
-
-#[cfg(not(target_feature = "sse2"))]
-pub fn multiversion_avx2(target: u64) -> u64 {
-    generic_ilp_u64::<15, u64>(target)
+    multiversion_sse2(target)
 }
 // ANCHOR_END: avx2
+
+// ANCHOR: narrow_SimdAccumulator
+#[cfg(target_feature = "avx2")]
+impl SimdAccumulator<u8> for safe_arch::m256i {
+    #[inline(always)]
+    fn identity(one: bool) -> Self {
+        Self::from([one as u8; <Self as SimdAccumulator<u8>>::WIDTH])
+    }
+
+    #[inline(always)]
+    fn add(self, other: Self) -> Self {
+        safe_arch::add_i8_m256i(self, other)
+    }
+
+    // AVX vectors of 8-bit integers reduce to AVX vectors of 16-bit integers
+    type ReducedCounter = u16;
+    type ReducedAccumulator = safe_arch::m256i;
+    //
+    #[inline(always)]
+    fn reduce_step(self) -> [Self::ReducedAccumulator; 2] {
+        use safe_arch::m256i;
+        fn extract_u16_m256i_from_u8_m256i<const LANE: i32>(u8s: m256i) -> m256i {
+            let half = safe_arch::extract_m128i_m256i::<LANE>(u8s);
+            safe_arch::convert_to_i16_m256i_from_u8_m128i(half)
+        }
+        [
+            extract_u16_m256i_from_u8_m256i::<0>(self),
+            extract_u16_m256i_from_u8_m256i::<1>(self),
+        ]
+    }
+}
+
+#[cfg(target_feature = "avx2")]
+impl SimdAccumulator<u16> for safe_arch::m256i {
+    #[inline(always)]
+    fn identity(one: bool) -> Self {
+        Self::from([one as u16; <Self as SimdAccumulator<u16>>::WIDTH])
+    }
+
+    #[inline(always)]
+    fn add(self, other: Self) -> Self {
+        safe_arch::add_i16_m256i(self, other)
+    }
+
+    // AVX vectors of 16-bit integers reduce to AVX vectors of 32-bit integers
+    type ReducedCounter = u32;
+    type ReducedAccumulator = safe_arch::m256i;
+    //
+    #[inline(always)]
+    fn reduce_step(self) -> [Self::ReducedAccumulator; 2] {
+        use safe_arch::m256i;
+        fn extract_u32_m256i_from_u16_m256i<const LANE: i32>(u16s: m256i) -> m256i {
+            let half = safe_arch::extract_m128i_m256i::<LANE>(u16s);
+            safe_arch::convert_to_i32_m256i_from_u16_m128i(half)
+        }
+        [
+            extract_u32_m256i_from_u16_m256i::<0>(self),
+            extract_u32_m256i_from_u16_m256i::<1>(self),
+        ]
+    }
+}
+
+#[cfg(target_feature = "avx2")]
+impl SimdAccumulator<u32> for safe_arch::m256i {
+    #[inline(always)]
+    fn identity(one: bool) -> Self {
+        Self::from([one as u32; <Self as SimdAccumulator<u32>>::WIDTH])
+    }
+
+    #[inline(always)]
+    fn add(self, other: Self) -> Self {
+        safe_arch::add_i32_m256i(self, other)
+    }
+
+    // AVX vectors of 32-bit integers reduce to AVX vectors of 64-bit integers
+    type ReducedCounter = u64;
+    type ReducedAccumulator = safe_arch::m256i;
+    //
+    #[inline(always)]
+    fn reduce_step(self) -> [Self::ReducedAccumulator; 2] {
+        use safe_arch::m256i;
+        fn extract_u64_m256i_from_u32_m256i<const LANE: i32>(u16s: m256i) -> m256i {
+            let half = safe_arch::extract_m128i_m256i::<LANE>(u16s);
+            safe_arch::convert_to_i64_m256i_from_u32_m128i(half)
+        }
+        [
+            extract_u64_m256i_from_u32_m256i::<0>(self),
+            extract_u64_m256i_from_u32_m256i::<1>(self),
+        ]
+    }
+}
+// ANCHOR_END: narrow_SimdAccumulator
+
+// ANCHOR: generic_ilp_simple
+pub fn generic_narrow_simple<
+    const ILP_WIDTH: usize,
+    Counter: num_traits::PrimInt,
+    Simd: SimdAccumulator<Counter>,
+>(
+    target: u64,
+) -> u64 {
+    assert_ne!(ILP_WIDTH, 0, "No progress possible in this configuration");
+
+    // Set up narrow SIMD counters and wide scalar counters
+    let mut simd_accumulators = [Simd::zeros(); ILP_WIDTH];
+    let mut scalar_accumulators = [0u64; ILP_WIDTH];
+
+    // Set up overflow avoidance through spilling to scalar counters
+    let mut counter_usage = Counter::zero();
+    let spill = |simd_accumulators: &mut [Simd; ILP_WIDTH],
+                 scalar_accumulators: &mut [u64; ILP_WIDTH]| {
+        for (scalar, simd) in scalar_accumulators
+            .iter_mut()
+            .zip(simd_accumulators.into_iter())
+        {
+            *scalar += simd.reduce();
+        }
+        for simd in simd_accumulators {
+            *simd = Simd::zeros();
+        }
+    };
+
+    // Accumulate in parallel
+    let mut remainder = target;
+    let full_width = (Simd::WIDTH * ILP_WIDTH) as u64;
+    while remainder >= full_width {
+        // Perform a round of counting
+        for simd_accumulator in &mut simd_accumulators {
+            simd_accumulator.increment();
+        }
+        remainder -= full_width;
+
+        // When the narrow SIMD counters fill up, spill to scalar counters
+        counter_usage = counter_usage + Counter::one();
+        if counter_usage == Counter::max_value() {
+            spill(&mut simd_accumulators, &mut scalar_accumulators);
+            counter_usage = Counter::zero();
+        }
+    }
+
+    // Merge SIMD accumulators into scalar counters
+    spill(&mut simd_accumulators, &mut scalar_accumulators);
+
+    // Accumulate remaining elements in scalar counters
+    while remainder > 0 {
+        for scalar_accumulator in scalar_accumulators.iter_mut().take(remainder as usize) {
+            scalar_accumulator.increment();
+            remainder -= 1;
+        }
+    }
+
+    // Merge scalar accumulators using parallel reduction
+    let mut stride = ILP_WIDTH.next_power_of_two() / 2;
+    while stride > 0 {
+        for i in 0..stride.min(ILP_WIDTH - stride) {
+            scalar_accumulators[i].merge(scalar_accumulators[i + stride]);
+        }
+        stride /= 2;
+    }
+    scalar_accumulators[0]
+}
+
+#[cfg(target_feature = "avx2")]
+pub fn narrow_simple<Counter: num_traits::PrimInt>(target: u64) -> u64
+where
+    safe_arch::m256i: SimdAccumulator<Counter>,
+{
+    generic_narrow_simple::<9, Counter, safe_arch::m256i>(target)
+}
+// ANCHOR_END: generic_ilp_simple
 
 #[cfg(test)]
 mod tests {
@@ -479,6 +644,18 @@ mod tests {
             (generic_ilp15_u64x2, crate::generic_ilp_u64::<15, m128i>),
             (generic_ilp16_u64x2, crate::generic_ilp_u64::<16, m128i>),
             (generic_ilp17_u64x2, crate::generic_ilp_u64::<17, m128i>)
+        );
+    }
+
+    #[cfg(target_feature = "avx2")]
+    mod avx2 {
+        use super::*;
+        use safe_arch::m256i;
+
+        test_counters!(
+            (narrow_simple_u8, crate::narrow_simple::<u8>),
+            (narrow_simple_u16, crate::narrow_simple::<u16>),
+            (narrow_simple_u32, crate::narrow_simple::<u32>)
         );
     }
 }

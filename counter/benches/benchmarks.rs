@@ -10,7 +10,7 @@ pub fn criterion_benchmark(c: &mut Criterion) {
         ("generic_ilp1_u64", counter::generic_ilp_u64::<1, u64>),
         ("generic_ilp15_u64", counter::generic_ilp_u64::<15, u64>),
         ("multiversion_sse2", counter::multiversion_sse2),
-        ("multiversion_avx2", counter::multiversion_sse2),
+        ("multiversion_avx2", counter::multiversion_avx2),
     ];
     #[cfg(target_feature = "sse2")]
     {
@@ -23,6 +23,14 @@ pub fn criterion_benchmark(c: &mut Criterion) {
             ("simd_ilp9", counter::simd_ilp::<9>),
             ("generic_ilp1_u64x2", counter::generic_ilp_u64::<1, m128i>),
             ("generic_ilp9_u64x2", counter::generic_ilp_u64::<9, m128i>),
+        ]);
+    }
+    #[cfg(target_feature = "avx2")]
+    {
+        benchmarks.extend_from_slice(&[
+            ("narrow_simple_u32", counter::narrow_simple::<u32>),
+            ("narrow_simple_u16", counter::narrow_simple::<u16>),
+            ("narrow_simple_u8", counter::narrow_simple::<u8>),
         ]);
     }
     for (group, counter) in benchmarks {
