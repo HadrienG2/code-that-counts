@@ -81,11 +81,10 @@ improve over u16 integers by a factor of 1.7 because we merge every 255
 increments and the merging overhead starts to become noticeable.
 
 Now, improving by a factor of 6.7x overall is already nice, but if we want this
-technique to provide the 8x speedup over the 64-bit SIMD version that it
-theoretically allows for, then we need to reduce the overhead of merging. And
-the obvious way to do that is to refrain from reducing narrow SIMD accumulators
-all the way to scalar u64s when spilling to wider SIMD accumulators would
-suffice.
+technique to get closer to the 8x speedup over the 64-bit SIMD version that it
+aimed for, then we need to reduce the overhead of merging. And the obvious way
+to do that is to refrain from reducing narrow SIMD accumulators all the way to
+scalar u64s when spilling to wider SIMD accumulators would suffice.
 
 Along the way, I'll also extract some complexity out of the full counter
 implementation, as it starts to pack too much complexity into a single function
@@ -94,12 +93,74 @@ for my taste again.
 
 ## Reaching peak asymptotic throughput
 
-TODO: Roll out an U8Accumulator that contains an [u8x32; ILP_WIDTH], and
-      [i16x16; ILP_WIDTH] and an [u64; ILP_WIDTH] as well as two u8 counters.
-      You can increment it and it increments into the u8x32, with auto-spill
-      into i16x16 that itself auto-spills to [u64; ILP_WIDTH]. By calling a
-      method, you extract a merged [u64; ILP_WIDTH].
+As outlined above, we want to have a cascading accumulation design where we
+increment a SIMD vector of 8-bit integers that spill into a SIMD vector of
+16-bit integers when full, and those SIMD vectors of 16-bit integers in turn
+spill into scalar 64-bit integers as they did before.
 
-TODO: Discuss throughput at lower iteration counts for each accumulator size
-      vs previous best multiversion_avx2 solution.
+One can offload this cascading accumulation concern to a dedicated struct...
 
+```rust,no_run
+{{#include ../counter/src/lib.rs:U8Accumulator}}
+```
+
+...and then build a top-level counting function that is expressed in terms of
+using this accumulator:
+
+```rust,no_run
+{{#include ../counter/src/lib.rs:narrow_u8}}
+```
+
+And with that, I get an 1.9x speedup with respect to the version that uses
+16-bit integers, or a 7.7x speedup with respect to the version that does not use
+narrow integers, for a final asymptotic performance of 98 integer increments
+per CPU cycle or 393 billion integer increments per second.
+
+Now, it's time to talk about non-asymptotic throughput.
+
+All this extra counter merging we now do to achieve 64-bit counting range using
+narrower integers is not free. It comes at the price of a steep reduction in
+performance at low iteration counts.
+
+Merely invoking a narrow counting function with no work to do costs 14ns with
+32-bit integers, 23ns with 16-bit integers, and 31ns with 8-bit integers. And at
+low iteration counts, we're also penalized by the fact that we're not trying to
+keep using the widest SIMD format at all times, as we did in the non-narrow SIMD
+versions, as the code for that would get quite gruesome when more and more
+accumulator reduction stages start to pile up!
+
+As a result, 32-bit hierarchical counting only becomes faster than 64-bit SIMD
+counting when counting to more than 2048, then 16-bit counting catches up around
+8192, and finally 8-bit counting becomes king of the hill around 16384 iterations.
+
+But hey, at least we are _eventually_ counting as fast as a single Zen 2 CPU
+core can count!
+
+## Improving small-scale throughput
+
+While the "entry cost" cannot be worked around without losing the benefits of
+counting with smaller integers, the problem of poor performance at low iteration
+counts can be worked around by simply offloading the work of small-scale
+countings to our previous SIMD + ILP version, which has a very low entry cost
+and much better performance than counting with scalar 64-bit integers already!
+
+```rust,no_run
+{{#include ../counter/src/lib.rs:narrow_u8_tuned}}
+```
+
+And with that, we get much more satisfactory performance at low iteration counts:
+
+- Above 16 iterations, `narrow_u8_tuned` is faster than un-tuned `narrow_u8`
+- Above 64 iterations, it is faster than `narrow_simple<u16>`
+- Above 1024 iterations, it is faster than `narrow_simple<u32>`
+- Above 2048 iterations, it is faster than `multiversion_avx2` alone
+
+Basically, as soon as the timing of another solution gets above 35-40ns,
+`narrow_u8_tuned` beats it. And for 4096 iterations, `narrow_u8_tuned` is a
+whopping 2.6x faster than its un-tuned counterpart.
+
+Speaking more generally, if you are trying to implement a general-purpose
+utility that must perform well on a very wide range of problem sizes, like
+`memcpy()` in C, it is a good idea to combine algorithms with low entry cost
+and suboptimal scaling with algorithms with high entry cost and better scaling
+like this. The price to pay being, of course, more code complexity.

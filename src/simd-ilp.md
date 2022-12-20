@@ -110,7 +110,7 @@ While mostly straightfoward, this trait has a number of generic knobs that we do
 not need yet but are going to use later on in this book. Let's go through them
 briefly:
 
-- The trait is parametrized on an inner integer type, to that we can use all of
+- The trait is parametrized on an inner integer type, so that we can use all of
   the integer widths supported by a given SIMD vector type later on.
 - Reduction from a SIMD vector of counters to a single 64-bit integer is
   performed through a series of recursive steps:

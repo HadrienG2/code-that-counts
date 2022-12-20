@@ -31,10 +31,12 @@ pub fn criterion_benchmark(c: &mut Criterion) {
             ("narrow_simple_u32", counter::narrow_simple::<u32>),
             ("narrow_simple_u16", counter::narrow_simple::<u16>),
             ("narrow_simple_u8", counter::narrow_simple::<u8>),
+            ("narrow_u8", counter::narrow_u8),
+            ("narrow_u8_tuned", counter::narrow_u8_tuned),
         ]);
     }
     for (group, counter) in benchmarks {
-        for size_pow2 in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20, 30] {
+        for size_pow2 in 0..=42 {
             let size = 1 << size_pow2;
             let mut group = c.benchmark_group(group);
             group.throughput(Throughput::Elements(size));
