@@ -94,7 +94,7 @@ for my taste again.
 ## Reaching peak asymptotic throughput
 
 As outlined above, we want to have a cascading accumulation design where we
-increment a SIMD vector of 8-bit integers that spill into a SIMD vector of
+increment SIMD vectors of 8-bit integers that spill into SIMD vectors of
 16-bit integers when full, and those SIMD vectors of 16-bit integers in turn
 spill into scalar 64-bit integers as they did before.
 
@@ -111,7 +111,7 @@ using this accumulator:
 {{#include ../counter/src/lib.rs:narrow_u8}}
 ```
 
-And with that, I get an 1.9x speedup with respect to the version that uses
+And with that, I get a 1.9x speedup with respect to the version that uses
 16-bit integers, or a 7.7x speedup with respect to the version that does not use
 narrow integers, for a final asymptotic performance of 98 integer increments
 per CPU cycle or 393 billion integer increments per second.
@@ -138,7 +138,7 @@ core can count!
 
 ## Improving small-scale throughput
 
-While the "entry cost" cannot be worked around without losing the benefits of
+While the "entry cost" cannot be reduced without losing some benefits of
 counting with smaller integers, the problem of poor performance at low iteration
 counts can be worked around by simply offloading the work of small-scale
 countings to our previous SIMD + ILP version, which has a very low entry cost
@@ -163,4 +163,4 @@ Speaking more generally, if you are trying to implement a general-purpose
 utility that must perform well on a very wide range of problem sizes, like
 `memcpy()` in C, it is a good idea to combine algorithms with low entry cost
 and suboptimal scaling with algorithms with high entry cost and better scaling
-like this. The price to pay being, of course, more code complexity.
+like this. The price to pay being, of course, more implementation complexity.

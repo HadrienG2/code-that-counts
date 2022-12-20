@@ -66,11 +66,17 @@ the x86 SIMD equivalent of what we've been doing with ILP for a while now.
 But to actually benefit from this, users need to compile the code with the
 `RUSTFLAGS` environment variable set to `-C target-cpu=native`. This will
 produce binaries specific to the host CPU, that will leverage all of its
-feature, including AVX2 if available. And that's the same way one would use
+features, including AVX2 if available. And that's the same way one would use
 SSE2 on older 32-bit x86 processors.
 
-The AVX2 version is never slower than the SSE2 version, and it is asymptotically
-twice as fast as we would expect. And with that, we reach peak 64-bit integer
-increment rate on all CPUs up to the AVX-512 generation (which I cannot test on,
-and thus will not cover here), which is twelve 64-bit integer increments per
+On Zen 2 and during high-intensity microbenchmarking, the AVX2 version is never
+slower than SSE2, and asymptotically twice as fast as one would expect. But it
+should be possible to find situations where the AVX2 version is slower
+than SSE2 one if it were called infrequently on older CPUs, due to power license
+sxitching phenomena.
+[Here's a discussion of those in an AVX-512 context.](https://travisdowns.github.io/blog/2020/01/17/avxfreq1.html)
+
+And with that, we reach peak 64-bit integer increment rate on all CPUs up to but
+not including the AVX-512 generation (which I cannot test on, and thus will not
+cover here). And our new record to beat is twelve 64-bit integer increments per
 cycle or 51.3 billion integer increments per second.
