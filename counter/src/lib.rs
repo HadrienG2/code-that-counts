@@ -357,10 +357,11 @@ impl SimdAccumulator<4> for safe_arch::m256i {
 
     #[inline(always)]
     fn reduce(self) -> u64 {
+        use safe_arch::m128i;
         let mut half = safe_arch::extract_m128i_m256i::<0>(self);
         let half2 = safe_arch::extract_m128i_m256i::<1>(self);
-        (half as SimdAccumulator<4>).merge(half2);
-        (half as SimdAccumulator<4>).reduce()
+        <m128i as SimdAccumulator<2>>::merge(&mut half, half2);
+        <m128i as SimdAccumulator<2>>::reduce(half)
     }
 }
 
@@ -449,5 +450,5 @@ mod tests {
     );
 
     #[cfg(target_feature = "avx2")]
-    test_counter!(multiversion_sse2);
+    test_counter!(multiversion_avx2);
 }
