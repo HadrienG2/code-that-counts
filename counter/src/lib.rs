@@ -357,11 +357,10 @@ impl SimdAccumulator<4> for safe_arch::m256i {
 
     #[inline(always)]
     fn reduce(self) -> u64 {
-        let half_1 = safe_arch::extract_m128i_m256i::<0>(self);
-        let half_2 = safe_arch::extract_m128i_m256i::<1>(self);
-        let half = safe_arch::add_i64_m128i(half_1, half_2);
-        let counters: [u64; 2] = half.into();
-        counters.iter().sum()
+        let mut half = safe_arch::extract_m128i_m256i::<0>(self);
+        let half2 = safe_arch::extract_m128i_m256i::<1>(self);
+        (half as SimdAccumulator<4>).merge(half2);
+        (half as SimdAccumulator<4>).reduce()
     }
 }
 

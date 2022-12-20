@@ -57,4 +57,14 @@ TODO: Reduce will need a lot of care to combine high speed with overflow
       into 64-bit vectors ? It certainly has the potential to reduce
       merging/reduction overhead and thus make small integers more attractive...
 
+      What if I actually could have a type ReduceResult in SimdAccumulator that
+      reduces to either an SIMD type of the same size but twice the integer
+      width, or the next narrower SIMD type if we're already at u64, and
+      eventually u64 ? And then redesign generic_ilp so it recursively calls
+      SimdAccumulator::reduce until it gets an u64 ?
+
+      Or maybe a type ReductionTree that does the recursive work internally ?
+      This will definitely need some extra code iterations before I do the
+      write-up!
+
 TODO: ...and then continue through implementation...
