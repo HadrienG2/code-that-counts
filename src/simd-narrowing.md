@@ -76,7 +76,7 @@ every time a narrow integer overflow would happen:
 ```
 
 ...and if we test this implementation, we see that each halving of the counter
-width doubles our throughput, until we reach u8 integers and there we only
+width doubles our throughput until we reach u8 integers. There we only
 improve over u16 integers by a factor of 1.7 because we merge every 255
 increments and the merging overhead starts to become noticeable.
 
@@ -84,10 +84,10 @@ Now, improving by a factor of 6.7x overall is already nice, but if we want this
 technique to provide the 8x speedup over the 64-bit SIMD version that it
 theoretically allows for, then we need to reduce the overhead of merging. And
 the obvious way to do that is to refrain from reducing narrow SIMD accumulators
-all the way to u64 integers when spilling to wider SIMD accumulators would
+all the way to scalar u64s when spilling to wider SIMD accumulators would
 suffice.
 
-And along the way, I'll also extract some complexity out of the full counter
+Along the way, I'll also extract some complexity out of the full counter
 implementation, as it starts to pack too much complexity into a single function
 for my taste again.
 
@@ -98,4 +98,7 @@ TODO: Roll out an U8Accumulator that contains an [u8x32; ILP_WIDTH], and
       [i16x16; ILP_WIDTH] and an [u64; ILP_WIDTH] as well as two u8 counters.
       You can increment it and it increments into the u8x32, with auto-spill
       into i16x16 that itself auto-spills to [u64; ILP_WIDTH]. By calling a
-      method, you extract an [u64; ILP_WIDTH], aka U64Accumulator
+      method, you extract a merged [u64; ILP_WIDTH].
+
+TODO: Discuss throughput at lower iteration counts.
+
