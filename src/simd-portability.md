@@ -32,12 +32,19 @@ that's the way we are going to use. Simple usage looks like this:
 {{#include ../counter/src/lib.rs:multiversion_sse2}}
 ```
 
-...and just like that, we get rid of our "supports SSE2" assumption by using our
-previous optimal SSE2 implementation where SSE2 is supported, and our previous
-optimal scalar implementation where SSE2 is not supported. It may not be
-optimally tuned for, say, an ARM chip, but at least it will run. The only caveat
-is that users of older x86 hardware will need to adjust their compiler options
-to benefit from this, as we'll demonstrate next.
+...and by sprinkling `#[cfg(target_feature = "sse2")]` in all the places where
+we have used SSE2-specific functionality before, we can get rid of our "supports
+SSE2" assumption by using our previous optimal SSE2 implementation where SSE2 is
+supported, and our previous optimal scalar implementation where SSE2 is not
+supported.
+
+The end result may not be optimally tuned for, say, an ARM chip, but at least it
+will run. Tuning can be taken care of later through more cfg directives as
+more hardware becomes available for testing.
+
+The biggest caveat of this approach is that users of older x86 hardware will
+need to adjust their compiler options to benefit from it, as we'll demonstrate
+next.
 
 
 ## Scaling up

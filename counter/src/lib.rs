@@ -39,6 +39,7 @@ pub fn basic_ilp<const WIDTH: usize>(target: u64) -> u64 {
 }
 // ANCHOR_END: ilp
 
+#[cfg(target_feature = "sse2")]
 // ANCHOR: simd_basic
 pub fn simd_basic(target: u64) -> u64 {
     use safe_arch::m128i;
@@ -63,6 +64,7 @@ pub fn simd_basic(target: u64) -> u64 {
 }
 // ANCHOR_END: simd_basic
 
+#[cfg(target_feature = "sse2")]
 // ANCHOR: simd_ilp
 pub fn simd_ilp<const ILP_WIDTH: usize>(target: u64) -> u64 {
     use safe_arch::m128i;
@@ -115,6 +117,7 @@ pub fn simd_ilp<const ILP_WIDTH: usize>(target: u64) -> u64 {
 }
 // ANCHOR_END: simd_ilp
 
+#[cfg(target_feature = "sse2")]
 // ANCHOR: extreme_ilp
 pub fn extreme_ilp<
     // Number of SIMD operations per cycle
@@ -244,7 +247,34 @@ pub trait SimdAccumulator<Counter>: Copy + Eq + Pessimize + Sized {
 }
 // ANCHOR_END: Accumulator
 
+#[cfg(target_feature = "sse2")]
 // ANCHOR: implAccumulator
+impl SimdAccumulator<u64> for safe_arch::m128i {
+    #[inline(always)]
+    fn zeros() -> Self {
+        Self::from([0u64; Self::WIDTH])
+    }
+
+    #[inline(always)]
+    fn ones() -> Self {
+        Self::from([1u64; Self::WIDTH])
+    }
+
+    #[inline(always)]
+    fn add(self, other: Self) -> Self {
+        safe_arch::add_i64_m128i(self, other)
+    }
+
+    // SSE vectors of 64-bit integers reduce to 64-bit integers
+    type ReducedCounter = u64;
+    type ReducedAccumulator = u64;
+    //
+    #[inline(always)]
+    fn reduce_step(self) -> [Self::ReducedAccumulator; 2] {
+        self.into()
+    }
+}
+
 impl SimdAccumulator<u64> for u64 {
     #[inline(always)]
     fn zeros() -> Self {
@@ -273,32 +303,6 @@ impl SimdAccumulator<u64> for u64 {
     #[inline(always)]
     fn reduce(self) -> u64 {
         self
-    }
-}
-
-impl SimdAccumulator<u64> for safe_arch::m128i {
-    #[inline(always)]
-    fn zeros() -> Self {
-        Self::from([0u64; Self::WIDTH])
-    }
-
-    #[inline(always)]
-    fn ones() -> Self {
-        Self::from([1u64; Self::WIDTH])
-    }
-
-    #[inline(always)]
-    fn add(self, other: Self) -> Self {
-        safe_arch::add_i64_m128i(self, other)
-    }
-
-    // SSE vectors of 64-bit integers reduce to 64-bit integers
-    type ReducedCounter = u64;
-    type ReducedAccumulator = u64;
-    //
-    #[inline(always)]
-    fn reduce_step(self) -> [Self::ReducedAccumulator; 2] {
-        self.into()
     }
 }
 // ANCHOR_END: implAccumulator
@@ -411,7 +415,6 @@ pub fn multiversion_avx2(target: u64) -> u64 {
 mod tests {
     use quickcheck::TestResult;
     use quickcheck_macros::quickcheck;
-    use safe_arch::m128i;
 
     fn test_counter(target: u32, mut counter: impl FnMut(u64) -> u64) -> TestResult {
         if target > 1 << 24 {
@@ -423,7 +426,7 @@ mod tests {
 
     macro_rules! test_counter {
         ($name:ident) => {
-            test_counter!(($name, super::$name));
+            test_counter!(($name, crate::$name));
         };
         (($name:ident, $imp:path)) => {
             #[quickcheck]
@@ -443,38 +446,45 @@ mod tests {
     //
     test_counters!(
         basic,
-        (ilp1, super::basic_ilp::<1>),
-        (ilp14, super::basic_ilp::<14>),
-        (ilp15, super::basic_ilp::<15>),
-        (ilp16, super::basic_ilp::<16>),
-        (ilp17, super::basic_ilp::<17>),
-        simd_basic,
-        (simd_ilp1, super::simd_ilp::<1>),
-        (simd_ilp9, super::simd_ilp::<9>),
-        (simd_ilp15, super::simd_ilp::<15>),
-        (simd_ilp16, super::simd_ilp::<16>),
-        (simd_ilp17, super::simd_ilp::<17>),
-        (extreme_ilp_1p1x1, super::extreme_ilp::<1, 1, 1, 2>),
-        (extreme_ilp_2p1x1, super::extreme_ilp::<2, 1, 1, 2>),
-        (extreme_ilp_3p1x1, super::extreme_ilp::<3, 1, 1, 2>),
-        (extreme_ilp_1p2x1, super::extreme_ilp::<1, 2, 1, 2>),
-        (extreme_ilp_3p2x2, super::extreme_ilp::<3, 2, 2, 2>),
-        (extreme_ilp_3p2x3, super::extreme_ilp::<3, 2, 3, 2>),
-        (extreme_ilp_3p2x4, super::extreme_ilp::<3, 2, 4, 2>),
-        (extreme_ilp_3p2x5, super::extreme_ilp::<3, 2, 5, 2>),
-        (generic_ilp1_u64, super::generic_ilp_u64::<1, u64>),
-        (generic_ilp14_u64, super::generic_ilp_u64::<14, u64>),
-        (generic_ilp15_u64, super::generic_ilp_u64::<15, u64>),
-        (generic_ilp16_u64, super::generic_ilp_u64::<16, u64>),
-        (generic_ilp17_u64, super::generic_ilp_u64::<17, u64>),
-        (generic_ilp1_u64x2, super::generic_ilp_u64::<1, m128i>),
-        (generic_ilp9_u64x2, super::generic_ilp_u64::<9, m128i>),
-        (generic_ilp15_u64x2, super::generic_ilp_u64::<15, m128i>),
-        (generic_ilp16_u64x2, super::generic_ilp_u64::<16, m128i>),
-        (generic_ilp17_u64x2, super::generic_ilp_u64::<17, m128i>),
-        multiversion_sse2
+        (ilp1, crate::basic_ilp::<1>),
+        (ilp14, crate::basic_ilp::<14>),
+        (ilp15, crate::basic_ilp::<15>),
+        (ilp16, crate::basic_ilp::<16>),
+        (ilp17, crate::basic_ilp::<17>),
+        multiversion_sse2,
+        multiversion_avx2
     );
 
-    #[cfg(target_feature = "avx2")]
-    test_counter!(multiversion_avx2);
+    #[cfg(target_feature = "sse2")]
+    mod sse2 {
+        use super::*;
+        use safe_arch::m128i;
+
+        test_counters!(
+            simd_basic,
+            (simd_ilp1, crate::simd_ilp::<1>),
+            (simd_ilp9, crate::simd_ilp::<9>),
+            (simd_ilp15, crate::simd_ilp::<15>),
+            (simd_ilp16, crate::simd_ilp::<16>),
+            (simd_ilp17, crate::simd_ilp::<17>),
+            (extreme_ilp_1p1x1, crate::extreme_ilp::<1, 1, 1, 2>),
+            (extreme_ilp_2p1x1, crate::extreme_ilp::<2, 1, 1, 2>),
+            (extreme_ilp_3p1x1, crate::extreme_ilp::<3, 1, 1, 2>),
+            (extreme_ilp_1p2x1, crate::extreme_ilp::<1, 2, 1, 2>),
+            (extreme_ilp_3p2x2, crate::extreme_ilp::<3, 2, 2, 2>),
+            (extreme_ilp_3p2x3, crate::extreme_ilp::<3, 2, 3, 2>),
+            (extreme_ilp_3p2x4, crate::extreme_ilp::<3, 2, 4, 2>),
+            (extreme_ilp_3p2x5, crate::extreme_ilp::<3, 2, 5, 2>),
+            (generic_ilp1_u64, crate::generic_ilp_u64::<1, u64>),
+            (generic_ilp14_u64, crate::generic_ilp_u64::<14, u64>),
+            (generic_ilp15_u64, crate::generic_ilp_u64::<15, u64>),
+            (generic_ilp16_u64, crate::generic_ilp_u64::<16, u64>),
+            (generic_ilp17_u64, crate::generic_ilp_u64::<17, u64>),
+            (generic_ilp1_u64x2, crate::generic_ilp_u64::<1, m128i>),
+            (generic_ilp9_u64x2, crate::generic_ilp_u64::<9, m128i>),
+            (generic_ilp15_u64x2, crate::generic_ilp_u64::<15, m128i>),
+            (generic_ilp16_u64x2, crate::generic_ilp_u64::<16, m128i>),
+            (generic_ilp17_u64x2, crate::generic_ilp_u64::<17, m128i>)
+        );
+    }
 }
