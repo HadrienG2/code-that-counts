@@ -770,6 +770,19 @@ pub fn thread_basic(target: u64, sequential: impl Fn(u64) -> u64 + Sync) -> u64 
 }
 // ANCHOR_END: thread_basic
 
+// ANCHOR: thread_rayon
+pub fn thread_rayon(target: u64, sequential: impl Fn(u64) -> u64 + Sync) -> u64 {
+    use rayon::prelude::*;
+    rayon::iter::split(target, |target| {
+        let half1 = target / 2;
+        let half2 = target - half1;
+        (half2, (half1 > 0).then_some(half1))
+    })
+    .map(&sequential)
+    .sum()
+}
+// ANCHOR_END: thread_rayon
+
 #[cfg(test)]
 mod tests {
     use quickcheck::TestResult;
@@ -857,7 +870,11 @@ mod tests {
             (narrow_simple_u32, crate::narrow_simple::<u32>),
             narrow_u8,
             narrow_u8_tuned,
-            (thread_narrow_u8_tuned, |target| crate::thread_basic(
+            (thread_basic, |target| crate::thread_basic(
+                target,
+                crate::narrow_u8_tuned
+            )),
+            (thread_rayon, |target| crate::thread_rayon(
                 target,
                 crate::narrow_u8_tuned
             ))

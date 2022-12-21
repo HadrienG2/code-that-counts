@@ -109,6 +109,7 @@ dependencies = [
  "pessimize",
  "quickcheck",
  "quickcheck_macros",
+ "rayon",
  "safe_arch",
 ]
 

@@ -10,5 +10,7 @@
     * [Portable](./simd-portability.md)
     * [Narrow](./simd-narrowing.md)
 - [Multithreading (WIP)](./multithreading.md)
+    * [Rayon](./multithreading-rayon.md)
+    * [TODO]()
 
 [Conclusion (WIP)](./conclusion.md)

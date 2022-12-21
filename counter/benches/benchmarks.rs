@@ -36,6 +36,9 @@ pub fn criterion_benchmark(c: &mut Criterion) {
             ("thread_basic", |target| {
                 counter::thread_basic(target, counter::narrow_u8_tuned)
             }),
+            ("thread_rayon", |target| {
+                counter::thread_rayon(target, counter::narrow_u8_tuned)
+            }),
         ]);
     }
     for (group, counter) in benchmarks {
