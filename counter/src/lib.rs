@@ -749,6 +749,27 @@ pub fn narrow_u8_tuned(target: u64) -> u64 {
 }
 // ANCHOR_END: narrow_u8_tuned
 
+// ANCHOR: thread_basic
+pub fn thread_basic(target: u64, sequential: impl Fn(u64) -> u64 + Sync) -> u64 {
+    let num_threads = std::thread::available_parallelism()
+        .map(|nzu| usize::from(nzu))
+        .unwrap_or(2);
+
+    let base_share = target / num_threads as u64;
+    let extra = target % num_threads as u64;
+    let sequential = &sequential;
+
+    std::thread::scope(|s| {
+        let mut threads = Vec::with_capacity(num_threads);
+        for thread in 0..num_threads as u64 {
+            let share = base_share + (thread < extra) as u64;
+            threads.push(s.spawn(move || sequential(share)));
+        }
+        threads.into_iter().map(|t| t.join().unwrap()).sum()
+    })
+}
+// ANCHOR_END: thread_basic
+
 #[cfg(test)]
 mod tests {
     use quickcheck::TestResult;
@@ -766,7 +787,7 @@ mod tests {
         ($name:ident) => {
             test_counter!(($name, crate::$name));
         };
-        (($name:ident, $imp:path)) => {
+        (($name:ident, $imp:expr)) => {
             #[quickcheck]
             fn $name(target: u32) -> TestResult {
                 test_counter(target, $imp)
@@ -835,7 +856,11 @@ mod tests {
             (narrow_simple_u16, crate::narrow_simple::<u16>),
             (narrow_simple_u32, crate::narrow_simple::<u32>),
             narrow_u8,
-            narrow_u8_tuned
+            narrow_u8_tuned,
+            (thread_narrow_u8_tuned, |target| crate::thread_basic(
+                target,
+                crate::narrow_u8_tuned
+            ))
         );
     }
 }
