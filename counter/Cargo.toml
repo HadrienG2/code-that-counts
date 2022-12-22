@@ -13,6 +13,7 @@ harness = false
 [dependencies]
 num-traits = "0.2"
 pessimize = { git = "https://github.com/HadrienG2/pessimize.git", features = ["safe_arch"] }
+once_cell = "1.16"
 rayon = "1.6"
 safe_arch = "0.6"
 
