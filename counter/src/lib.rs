@@ -1,5 +1,3 @@
-use std::sync::atomic::AtomicBool;
-
 use pessimize::Pessimize;
 
 // ANCHOR: basic
@@ -856,94 +854,116 @@ struct SharedState {
     /// Number of worker threads
     num_threads: usize,
 
+    /// Number of worker threads that are not yet ready to take on a new task
+    ///
+    /// When num_busy reaches 0, it signals to the main thread that worker
+    /// threads are all ready to start a new job, and when it reaches
+    /// num_threads, it signals to the worker thread that last incremented it
+    /// that all other worker threads have acknowledged the new job. Both of
+    /// these events provide Acquire/Release synchronization.
+    ///
+    num_busy: atomic::Atomic<usize>,
+
+    /// Number of worker threads that have work to do
+    ///
+    /// When num_working reaches 0, it signals to the worker thread that last
+    /// decremented it that all worker threads are done with the current job,
+    /// with Acquire/Release synchronization.
+    ///
+    num_working: atomic::Atomic<usize>,
+
     /// Requested or ongoing computation, 0 means no pending request
-    task: std::sync::atomic::AtomicU64,
+    ///
+    /// New tasks are published with Acquire/Release synchronization.
+    ///
+    task: atomic::Atomic<u64>,
 
     /// Signal telling threads to stop
-    exit: std::sync::atomic::AtomicBool,
+    ///
+    /// Stop signals are raised with Acquire/Release synchronization.
+    ///
+    exit: atomic::Atomic<bool>,
 
-    /// Mutex-protexted state
+    /// State protection mutex
+    ///
+    /// Besides its role in protecting concurrent accesses to the main thread
+    /// identifier, this mutex is also used to reduce the number of expensive
+    /// atomic read-modify-write operations by protecting writes to atomics.
+    ///
     locked: std::sync::Mutex<LockedState>,
 
-    /// Computation result
-    result: std::sync::atomic::AtomicU64,
+    /// Computation result, synchronized using thread::park() and unpark().
+    result: atomic::Atomic<u64>,
 
     /// Worker threads that are waiting for a request from the main thread.
     /// This can take the form of a counting task or a termination request.
     start: std::sync::Condvar,
-
-    /// Barrier used to wait for all thread to be finished at the end of a job
-    // FIXME: Should be able to get rid of this one by tracking extra state:
-    //        if I distinguish between a ready state and a running state, then
-    //        the last thread that enters the running state can zero out the
-    //        task input so I don't need to do it at the end.
-    end: std::sync::Barrier,
-
-    /// Waiting for all threads to be ready for work.
-    /// Needed so that `start` condvar reaches everyone.
-    // TODO: Try replacing this condvar with busy waiting, it should be okay in
-    //       practice since the amount of code between the moment where the
-    //       main thread is awoken and the moment where the workers are ready
-    ready: std::sync::Condvar,
 }
 //
 impl SharedState {
+    /// Special value of self.task that means "no task right now"
+    const NO_TASK: u64 = 0;
+
     /// Set up shared state
     pub fn new(num_threads: usize) -> Self {
-        use std::sync::{atomic::AtomicU64, Barrier, Condvar, Mutex};
+        use atomic::Atomic;
+        use std::sync::{Condvar, Mutex};
         Self {
             num_threads,
-            task: AtomicU64::new(0),
-            exit: AtomicBool::new(false),
-            locked: Mutex::new(LockedState {
-                num_ready: 0,
-                caller: None,
-            }),
-            result: AtomicU64::default(),
+            num_busy: Atomic::new(num_threads),
+            num_working: Atomic::new(0),
+            task: Atomic::new(Self::NO_TASK),
+            exit: Atomic::new(false),
+            locked: Mutex::new(LockedState { caller: None }),
+            result: Atomic::default(),
             start: Condvar::new(),
-            end: Barrier::new(num_threads),
-            ready: Condvar::new(),
         }
     }
 
     /// Schedule counting work and wait for the end result
     pub fn count(&self, target: u64) -> u64 {
-        use std::{sync::atomic::Ordering, thread};
+        use atomic::Ordering;
+        use std::{hint, thread};
 
         // Special-case empty job, freeing up self.task == 0 to mean "no task"
         if target == 0 {
             return 0;
         }
 
-        // Start setting up non-sensitive parts of the shared state
-        debug_assert_eq!(self.task.load(Ordering::Relaxed), 0);
+        // Check and set up non-synchronization-critical parts of the shared state
+        debug_assert_eq!(self.num_working.load(Ordering::Relaxed), 0);
+        debug_assert_eq!(self.task.load(Ordering::Relaxed), Self::NO_TASK);
         debug_assert_eq!(self.exit.load(Ordering::Relaxed), false);
         self.result.store(0, Ordering::Relaxed);
+
+        // Wait for worker threads to be ready
+        // It is okay to spin here because worker threads should go very quickly
+        // from emitting the result to decrementing num_busy.
+        while self.num_busy.load(Ordering::Relaxed) != 0 {
+            hint::spin_loop();
+        }
+        atomic::fence(Ordering::Acquire);
+
+        // Wait for all worker threads to be sleeping on self.start,
+        // then use the fact we hold the lock to broadcast our ID
         {
             let mut lock = self.locked.lock().unwrap();
             debug_assert!(lock.caller.is_none());
             lock.caller = Some(thread::current());
-
-            // Wait for worker threads to be ready
-            std::mem::drop(
-                // TODO: Might avoid futex overhead here by spinning a little
-                self.ready
-                    .wait_while(lock, |lock| lock.num_ready < self.num_threads)
-                    .unwrap(),
-            );
         }
 
         // Schedule work
-        // TODO: Can avoid futex overhead here by making workers spin
+        // TODO: Could reduce futex overhead here by making workers spin
+        self.num_working.store(self.num_threads, Ordering::Relaxed);
         self.task.store(target, Ordering::Release);
         self.start.notify_all();
 
         // Wait for workers to be done
-        // NOTE: Futex overhead here is unavoidable and actually okay
+        // NOTE: Futex overhead here is hard to avoid and actually okay?
         thread::park();
 
-        // Fetch result
-        self.result.load(Ordering::Acquire)
+        // Fetch result, piggybacking on thread::park()'s Acquire barrier
+        self.result.load(Ordering::Relaxed)
     }
 
     /// Wait for a counting task or an exit signal
@@ -952,32 +972,37 @@ impl SharedState {
     /// figure out its share of work from it.
     ///
     pub fn wait_for_work(&self) -> Option<u64> {
-        use std::sync::atomic::{fence, Ordering};
+        use atomic::{fence, Ordering};
 
-        let (mut task, mut exit) = (0, false);
+        let (mut task, mut exit) = (Self::NO_TASK, false);
         {
             // Notify the main thread that we are ready
-            // Must notify while holding the lock because we must be asleep by
-            // the time the main thread observes num_ready == num_threads.
+            //
+            // Even if we were to switch to atomic increments, we'd still want
+            // to do this while holding the lock so that the main thread can
+            // synchronize with us waiting on the self.start condvar by
+            // acquiring the lock before notifying self.start.
+            //
             let mut lock = self.locked.lock().unwrap();
-            debug_assert!(lock.num_ready < self.num_threads);
-            lock.num_ready += 1;
-            if lock.num_ready == self.num_threads {
-                self.ready.notify_one();
-            }
+            lock.fetch_dec(&self.num_busy, Ordering::Release);
 
-            // Start waiting for work
-            std::mem::drop(
-                self.start
-                    .wait_while(lock, |_| {
-                        task = self.task.load(Ordering::Relaxed);
-                        exit = self.exit.load(Ordering::Relaxed);
-                        task == 0 && !exit
-                    })
-                    .unwrap(),
-            );
+            // Wait for the main thread to send work
+            lock = self
+                .start
+                .wait_while(lock, |_| {
+                    task = self.task.load(Ordering::Relaxed);
+                    exit = self.exit.load(Ordering::Relaxed);
+                    task == Self::NO_TASK && !exit
+                })
+                .unwrap();
+            fence(Ordering::Acquire);
+
+            // Acknowledge the task, reset waiting state if we are last
+            if lock.fetch_inc(&self.num_busy, Ordering::Release, self.num_threads) {
+                fence(Ordering::Acquire);
+                self.task.store(Self::NO_TASK, Ordering::Relaxed);
+            }
         }
-        fence(Ordering::Acquire);
 
         // Encode either task or termination request into a result
         (!exit).then_some(task)
@@ -985,45 +1010,93 @@ impl SharedState {
 
     /// Submit partial counting results
     pub fn submit_result(&self, result: u64) {
-        use std::sync::atomic::Ordering;
+        use atomic::Ordering;
 
         // Update shared state
-        debug_assert_ne!(self.task.load(Ordering::Relaxed), 0);
         let caller_if_last = {
             let mut lock = self.locked.lock().unwrap();
 
-            // Note that we are done, check if the overall job is done
-            debug_assert!(lock.num_ready >= 1);
-            lock.num_ready -= 1;
-            let is_last = lock.num_ready == 0;
+            // Merge results
+            lock.fetch_add(&self.result, result, Ordering::Relaxed);
 
-            // Merge result, no need for fetch_add as we're using a lock
-            self.result.store(
-                self.result.load(Ordering::Relaxed) + result,
-                Ordering::Release,
-            );
+            // Notify that we are done, check if the overall job is done
+            let is_last = lock.fetch_dec(&self.num_working, Ordering::Release);
 
             // Prepare to wake up the caller if we are the last
-            is_last.then(|| lock.caller.take().unwrap())
+            debug_assert!(lock.caller.is_some());
+            is_last.then(|| {
+                atomic::fence(Ordering::Acquire);
+                lock.caller.take().unwrap()
+            })
         };
 
-        // If we are the last one, wake up the caller and reset the task state
-        // before waking up our peers.
+        // If we are the last one, wake up the caller
         if let Some(caller) = caller_if_last {
             caller.unpark();
-            self.task.store(0, Ordering::Release);
         }
-        self.end.wait();
     }
 }
 
+/// Lock-protected state and operations
 struct LockedState {
-    /// Number of worker threads that are ready to take on a new tosk or
-    /// already in the process of executing one (no need to discriminate those)
-    num_ready: usize,
-
     /// Mechanism to wake up the main thread
     caller: Option<std::thread::Thread>,
+}
+//
+impl LockedState {
+    /// Specialization of fetch_update for counter decrement that goes to zero
+    pub fn fetch_dec(&self, target: &atomic::Atomic<usize>, order: atomic::Ordering) -> bool {
+        self.fetch_update(target, order, |old| old > 0, |old| old - 1) == 1
+    }
+
+    /// Specialization of fetch_update for counter increment that goes to a max
+    pub fn fetch_inc(
+        &self,
+        target: &atomic::Atomic<usize>,
+        order: atomic::Ordering,
+        max: usize,
+    ) -> bool {
+        self.fetch_update(target, order, |old| old < max, |old| old + 1) == max - 1
+    }
+
+    /// Specialization of fetch_update for result aggregation
+    pub fn fetch_add(&self, target: &atomic::Atomic<u64>, value: u64, order: atomic::Ordering) {
+        self.fetch_update(
+            target,
+            order,
+            |old| old <= u64::MAX - value,
+            |old| old + value,
+        );
+    }
+
+    /// Non-atomic read-modify_write operation that is actually atomic if all
+    /// writes to the target variable occur while holding this lock
+    fn fetch_update<T: Copy>(
+        &self,
+        target: &atomic::Atomic<T>,
+        order: atomic::Ordering,
+        check: impl FnOnce(T) -> bool,
+        change: impl FnOnce(T) -> T,
+    ) -> T {
+        assert!(atomic::Atomic::<T>::is_lock_free());
+        let [load_order, store_order] = Self::rmw_order(order);
+        let old = target.load(load_order);
+        debug_assert!(check(old));
+        target.store(change(old), store_order);
+        old
+    }
+
+    /// Load and store ordering of non-atomic read-modify-write operations
+    fn rmw_order(order: atomic::Ordering) -> [atomic::Ordering; 2] {
+        use atomic::Ordering;
+        match order {
+            Ordering::Relaxed => [Ordering::Relaxed, Ordering::Relaxed],
+            Ordering::Acquire => [Ordering::Acquire, Ordering::Relaxed],
+            Ordering::Release => [Ordering::Relaxed, Ordering::Release],
+            Ordering::AcqRel => [Ordering::Acquire, Ordering::Release],
+            Ordering::SeqCst | _ => unimplemented!(),
+        }
+    }
 }
 // ANCHOR_END: BackgroundThreads
 
