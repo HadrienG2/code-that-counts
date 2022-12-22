@@ -821,7 +821,7 @@ impl BackgroundThreads {
         thread_idx: usize,
         mut counter: impl FnMut(u64) -> u64,
     ) {
-        // FIXME: Handle panics
+        // FIXME: Handle worker panics
         let thread_idx = thread_idx as u64;
         let num_threads = state.num_threads as u64;
         while let Some(input) = state.wait_for_work() {
@@ -846,11 +846,12 @@ impl Drop for BackgroundThreads {
     /// Tell worker threads to exit on Drop
     fn drop(&mut self) {
         use std::sync::atomic::Ordering;
-        self.state.exit.store(true, Ordering::Relaxed);
+        self.state.exit.store(true, Ordering::Release);
         self.state.start.notify_all();
     }
 }
 
+// TODO: Try parking_lot alternatives to std primitives
 struct SharedState {
     /// Number of worker threads
     num_threads: usize,
@@ -872,10 +873,17 @@ struct SharedState {
     start: std::sync::Condvar,
 
     /// Barrier used to wait for all thread to be finished at the end of a job
+    // FIXME: Should be able to get rid of this one by tracking extra state:
+    //        if I distinguish between a ready state and a running state, then
+    //        the last thread that enters the running state can zero out the
+    //        task input so I don't need to do it at the end.
     end: std::sync::Barrier,
 
     /// Waiting for all threads to be ready for work.
     /// Needed so that `start` condvar reaches everyone.
+    // TODO: Try replacing this condvar with busy waiting, it should be okay in
+    //       practice since the amount of code between the moment where the
+    //       main thread is awoken and the moment where the workers are ready
     ready: std::sync::Condvar,
 }
 //
@@ -918,6 +926,7 @@ impl SharedState {
 
             // Wait for worker threads to be ready
             std::mem::drop(
+                // TODO: Might avoid futex overhead here by spinning a little
                 self.ready
                     .wait_while(lock, |lock| lock.num_ready < self.num_threads)
                     .unwrap(),
@@ -925,14 +934,16 @@ impl SharedState {
         }
 
         // Schedule work
-        self.task.store(target, Ordering::Relaxed);
+        // TODO: Can avoid futex overhead here by making workers spin
+        self.task.store(target, Ordering::Release);
         self.start.notify_all();
 
         // Wait for workers to be done
+        // NOTE: Futex overhead here is unavoidable and actually okay
         thread::park();
 
         // Fetch result
-        self.result.load(Ordering::Relaxed)
+        self.result.load(Ordering::Acquire)
     }
 
     /// Wait for a counting task or an exit signal
@@ -941,7 +952,7 @@ impl SharedState {
     /// figure out its share of work from it.
     ///
     pub fn wait_for_work(&self) -> Option<u64> {
-        use std::sync::atomic::Ordering;
+        use std::sync::atomic::{fence, Ordering};
 
         let (mut task, mut exit) = (0, false);
         {
@@ -966,6 +977,7 @@ impl SharedState {
                     .unwrap(),
             );
         }
+        fence(Ordering::Acquire);
 
         // Encode either task or termination request into a result
         (!exit).then_some(task)
@@ -988,7 +1000,7 @@ impl SharedState {
             // Merge result, no need for fetch_add as we're using a lock
             self.result.store(
                 self.result.load(Ordering::Relaxed) + result,
-                Ordering::Relaxed,
+                Ordering::Release,
             );
 
             // Prepare to wake up the caller if we are the last
@@ -999,13 +1011,12 @@ impl SharedState {
         // before waking up our peers.
         if let Some(caller) = caller_if_last {
             caller.unpark();
-            self.task.store(0, Ordering::Relaxed);
+            self.task.store(0, Ordering::Release);
         }
         self.end.wait();
     }
 }
 
-#[derive(Debug)]
 struct LockedState {
     /// Number of worker threads that are ready to take on a new tosk or
     /// already in the process of executing one (no need to discriminate those)
