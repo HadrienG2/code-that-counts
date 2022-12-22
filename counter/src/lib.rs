@@ -822,12 +822,13 @@ impl BackgroundThreads {
         // FIXME: Handle worker panics
         let thread_idx = thread_idx as u64;
         let num_threads = state.num_threads as u64;
-        while let Some(input) = state.wait_for_work() {
+        let mut lock = state.lock();
+        while let Some(input) = state.wait_for_work(lock) {
             let base_share = input / num_threads as u64;
             let extra = input % num_threads as u64;
             let share = base_share + (thread_idx < extra) as u64;
             let result = counter(share);
-            state.submit_result(result);
+            lock = state.submit_result(result);
         }
     }
 
@@ -958,7 +959,7 @@ impl SharedState {
         // then use the fact we hold the lock to broadcast our ID
         debug_log(true, "syncing up and publishing its ID");
         {
-            let mut lock = self.locked.lock().unwrap();
+            let mut lock = self.lock();
             debug_assert!(lock.caller.is_none());
             lock.caller = Some(std::thread::current());
         }
@@ -978,45 +979,47 @@ impl SharedState {
         self.result.load(Ordering::Relaxed)
     }
 
+    /// Acquire shared state lock
+    pub fn lock(&self) -> std::sync::MutexGuard<LockedState> {
+        self.locked.lock().unwrap()
+    }
+
     /// Wait for a counting task or an exit signal
     ///
     /// This returns the full counting task, it is then up to this thread to
     /// figure out its share of work from it.
     ///
-    pub fn wait_for_work(&self) -> Option<u64> {
+    pub fn wait_for_work(&self, mut lock: std::sync::MutexGuard<LockedState>) -> Option<u64> {
         use atomic::{fence, Ordering};
 
+        // Notify the main thread that we are ready
+        //
+        // Even if we were to switch to atomic increments, we'd still want
+        // to do this while holding the lock so that the main thread that
+        // sees us decrement it can synchronize with us waiting on the
+        // `start` condvar by acquiring the lock before notifying `start`.
+        //
+        debug_log(false, "ready to accept work");
+        lock.fetch_dec(&self.num_busy, Ordering::Release);
+
+        // Wait for the main thread to send work
         let (mut task, mut exit) = (Self::NO_TASK, false);
-        {
-            // Notify the main thread that we are ready
-            //
-            // Even if we were to switch to atomic increments, we'd still want
-            // to do this while holding the lock so that the main thread that
-            // sees us decrement it can synchronize with us waiting on the
-            // `start` condvar by acquiring the lock before notifying `start`.
-            //
-            debug_log(false, "ready to accept work");
-            let mut lock = self.locked.lock().unwrap();
-            lock.fetch_dec(&self.num_busy, Ordering::Release);
+        lock = self
+            .start
+            .wait_while(lock, |_| {
+                task = self.task.load(Ordering::Relaxed);
+                exit = self.exit.load(Ordering::Relaxed);
+                task == Self::NO_TASK && !exit
+            })
+            .unwrap();
+        fence(Ordering::Acquire);
 
-            // Wait for the main thread to send work
-            lock = self
-                .start
-                .wait_while(lock, |_| {
-                    task = self.task.load(Ordering::Relaxed);
-                    exit = self.exit.load(Ordering::Relaxed);
-                    task == Self::NO_TASK && !exit
-                })
-                .unwrap();
+        // Acknowledge the task, reset waiting state if we are last
+        debug_log(false, "up and running");
+        if lock.fetch_inc(&self.num_busy, Ordering::Release, self.num_threads) {
             fence(Ordering::Acquire);
-
-            // Acknowledge the task, reset waiting state if we are last
-            debug_log(false, "up and running");
-            if lock.fetch_inc(&self.num_busy, Ordering::Release, self.num_threads) {
-                fence(Ordering::Acquire);
-                debug_log(false, "resetting task input");
-                self.task.store(Self::NO_TASK, Ordering::Release);
-            }
+            debug_log(false, "resetting task input");
+            self.task.store(Self::NO_TASK, Ordering::Release);
         }
 
         // Encode either task or termination request into a result
@@ -1024,39 +1027,30 @@ impl SharedState {
     }
 
     /// Submit partial counting results
-    pub fn submit_result(&self, result: u64) {
+    pub fn submit_result(&self, result: u64) -> std::sync::MutexGuard<LockedState> {
         use atomic::Ordering;
 
-        // Update shared state
-        let caller_if_last = {
-            let mut lock = self.locked.lock().unwrap();
+        // Merge results
+        debug_log(false, "merging its result contribution");
+        let mut lock = self.lock();
+        lock.fetch_add(&self.result, result, Ordering::Relaxed);
 
-            // Merge results
-            debug_log(false, "merging its result contribution");
-            lock.fetch_add(&self.result, result, Ordering::Relaxed);
-
-            // Notify that we are done, check if the overall job is done
-            debug_log(false, "done with this job");
-            let is_last = lock.fetch_dec(&self.num_working, Ordering::Release);
-
-            // Prepare to wake up the caller if we are the last
-            debug_assert!(lock.caller.is_some());
-            is_last.then(|| {
-                atomic::fence(Ordering::Acquire);
-                lock.caller.take().unwrap()
-            })
-        };
-
-        // If we are the last one, wake up the caller...
-        if let Some(caller) = caller_if_last {
+        // Notify that we are done, check if the overall job is done
+        debug_log(false, "done with this job");
+        if lock.fetch_dec(&self.num_working, Ordering::Release) {
+            // If so, the end result is ready, so wake up the main thread
+            atomic::fence(Ordering::Acquire);
             debug_log(false, "waking up the main thread");
-            caller.unpark();
+            lock.caller.take().unwrap().unpark();
         } else {
-            // ...otherwise resume waiting for a task as soon as it's safe
+            // ...otherwise wait until it's safe to block for a task
             debug_log(false, "waiting for task reset");
+            std::mem::drop(lock);
             Self::spin_wait(|| self.task.load(Ordering::Relaxed) == Self::NO_TASK);
             atomic::fence(Ordering::Acquire);
+            lock = self.lock();
         }
+        lock
     }
 
     /// Spin on some condition
