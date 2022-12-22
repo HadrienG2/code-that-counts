@@ -842,9 +842,12 @@ impl BackgroundThreads {
 //
 impl Drop for BackgroundThreads {
     /// Tell worker threads to exit on Drop
+    /// Need to lock before notifying to avoid lost wakeups.
     fn drop(&mut self) {
         use std::sync::atomic::Ordering;
+        debug_log(true, "sending the stop signal");
         self.state.exit.store(true, Ordering::Release);
+        let _lock = self.state.locked.lock().unwrap();
         self.state.start.notify_all();
     }
 }
@@ -856,25 +859,32 @@ struct SharedState {
 
     /// Number of worker threads that are not yet ready to take on a new task
     ///
-    /// When num_busy reaches 0, it signals to the main thread that worker
-    /// threads are all ready to start a new job, and when it reaches
-    /// num_threads, it signals to the worker thread that last incremented it
-    /// that all other worker threads have acknowledged the new job. Both of
-    /// these events provide Acquire/Release synchronization.
+    /// `num_busy` starts at `num_threads`. Each time a thread is ready to
+    /// accept a new job, it decrements it. So when it reaches 0, it tells the
+    /// main thread that all worker threads are ready to accept a new job and
+    /// it can submit one.
+    ///
+    /// As worker threads accept jobs, they increment `num_busy` back, so when
+    /// it reaches back `num_threads`, it tells the worker threads that last
+    /// incremented it that all worker threads have fetched the new job.
+    ///
+    /// Both of these events provide Acquire/Release synchronization.
     ///
     num_busy: atomic::Atomic<usize>,
 
     /// Number of worker threads that have work to do
     ///
-    /// When num_working reaches 0, it signals to the worker thread that last
-    /// decremented it that all worker threads are done with the current job,
-    /// with Acquire/Release synchronization.
+    /// `num_working` is set to `num_threads` when work is submitted. Each time
+    /// a thread is done with its job, it decrements this counter. So when it
+    /// reaches 0, it tells the worker thread that last decremented it that all
+    /// worker threads are done, with Acquire/Release synchronization.
     ///
     num_working: atomic::Atomic<usize>,
 
     /// Requested or ongoing computation, 0 means no pending request
     ///
-    /// New tasks are published with Acquire/Release synchronization.
+    /// Used to publish new tasks, then reset once all threads have fetched
+    /// the task. Both events are signaled with Acquire/Release synchronization.
     ///
     task: atomic::Atomic<u64>,
 
@@ -901,7 +911,7 @@ struct SharedState {
 }
 //
 impl SharedState {
-    /// Special value of self.task that means "no task right now"
+    /// Special value of `task` that means "no task right now"
     const NO_TASK: u64 = 0;
 
     /// Set up shared state
@@ -923,15 +933,16 @@ impl SharedState {
     /// Schedule counting work and wait for the end result
     pub fn count(&self, target: u64) -> u64 {
         use atomic::Ordering;
-        use std::{hint, thread};
 
-        // Special-case empty job, freeing up self.task == 0 to mean "no task"
+        // Special-case empty job, freeing up `task` == 0 to mean "no task"
         if target == 0 {
             return 0;
         }
 
         // Check and set up non-synchronization-critical parts of the shared state
+        debug_log(true, "preparing for a new job");
         debug_assert_eq!(self.num_working.load(Ordering::Relaxed), 0);
+        self.num_working.store(self.num_threads, Ordering::Relaxed);
         debug_assert_eq!(self.task.load(Ordering::Relaxed), Self::NO_TASK);
         debug_assert_eq!(self.exit.load(Ordering::Relaxed), false);
         self.result.store(0, Ordering::Relaxed);
@@ -939,28 +950,29 @@ impl SharedState {
         // Wait for worker threads to be ready
         // It is okay to spin here because worker threads should go very quickly
         // from emitting the result to decrementing num_busy.
-        while self.num_busy.load(Ordering::Relaxed) != 0 {
-            hint::spin_loop();
-        }
+        debug_log(true, "waiting for threads to be ready");
+        Self::spin_wait(|| self.num_busy.load(Ordering::Relaxed) == 0);
         atomic::fence(Ordering::Acquire);
 
-        // Wait for all worker threads to be sleeping on self.start,
+        // Wait for all worker threads to be sleeping on `start`,
         // then use the fact we hold the lock to broadcast our ID
+        debug_log(true, "syncing up and publishing its ID");
         {
             let mut lock = self.locked.lock().unwrap();
             debug_assert!(lock.caller.is_none());
-            lock.caller = Some(thread::current());
+            lock.caller = Some(std::thread::current());
         }
 
         // Schedule work
         // TODO: Could reduce futex overhead here by making workers spin
-        self.num_working.store(self.num_threads, Ordering::Relaxed);
+        debug_log(true, "starting previously prepared job");
         self.task.store(target, Ordering::Release);
         self.start.notify_all();
 
         // Wait for workers to be done
         // NOTE: Futex overhead here is hard to avoid and actually okay?
-        thread::park();
+        debug_log(true, "waiting for result");
+        std::thread::park();
 
         // Fetch result, piggybacking on thread::park()'s Acquire barrier
         self.result.load(Ordering::Relaxed)
@@ -979,10 +991,11 @@ impl SharedState {
             // Notify the main thread that we are ready
             //
             // Even if we were to switch to atomic increments, we'd still want
-            // to do this while holding the lock so that the main thread can
-            // synchronize with us waiting on the self.start condvar by
-            // acquiring the lock before notifying self.start.
+            // to do this while holding the lock so that the main thread that
+            // sees us decrement it can synchronize with us waiting on the
+            // `start` condvar by acquiring the lock before notifying `start`.
             //
+            debug_log(false, "ready to accept work");
             let mut lock = self.locked.lock().unwrap();
             lock.fetch_dec(&self.num_busy, Ordering::Release);
 
@@ -998,9 +1011,11 @@ impl SharedState {
             fence(Ordering::Acquire);
 
             // Acknowledge the task, reset waiting state if we are last
+            debug_log(false, "up and running");
             if lock.fetch_inc(&self.num_busy, Ordering::Release, self.num_threads) {
                 fence(Ordering::Acquire);
-                self.task.store(Self::NO_TASK, Ordering::Relaxed);
+                debug_log(false, "resetting task input");
+                self.task.store(Self::NO_TASK, Ordering::Release);
             }
         }
 
@@ -1017,9 +1032,11 @@ impl SharedState {
             let mut lock = self.locked.lock().unwrap();
 
             // Merge results
+            debug_log(false, "merging its result contribution");
             lock.fetch_add(&self.result, result, Ordering::Relaxed);
 
             // Notify that we are done, check if the overall job is done
+            debug_log(false, "done with this job");
             let is_last = lock.fetch_dec(&self.num_working, Ordering::Release);
 
             // Prepare to wake up the caller if we are the last
@@ -1030,9 +1047,33 @@ impl SharedState {
             })
         };
 
-        // If we are the last one, wake up the caller
+        // If we are the last one, wake up the caller...
         if let Some(caller) = caller_if_last {
+            debug_log(false, "waking up the main thread");
             caller.unpark();
+        } else {
+            // ...otherwise resume waiting for a task as soon as it's safe
+            debug_log(false, "waiting for task reset");
+            Self::spin_wait(|| self.task.load(Ordering::Relaxed) == Self::NO_TASK);
+            atomic::fence(Ordering::Acquire);
+        }
+    }
+
+    /// Spin on some condition
+    fn spin_wait(mut termination: impl FnMut() -> bool) {
+        // Start with a spin loop with exponential backoff
+        for backoff in 0..3 {
+            if termination() {
+                return;
+            }
+            for _ in 0..1 << backoff {
+                std::hint::spin_loop();
+            }
+        }
+
+        // Switch to yielding to the OS once it's clear it's gonna take a while
+        while !termination() {
+            std::thread::yield_now();
         }
     }
 }
@@ -1096,6 +1137,20 @@ impl LockedState {
             Ordering::AcqRel => [Ordering::Acquire, Ordering::Release],
             Ordering::SeqCst | _ => unimplemented!(),
         }
+    }
+}
+
+/// Debug logging
+fn debug_log(main: bool, action: &str) {
+    if cfg!(debug_assertions) {
+        static MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _lock = MUTEX.lock();
+        if main {
+            eprint!("Main thread");
+        } else {
+            eprint!("{:?}", std::thread::current().id());
+        }
+        eprintln!(" is {action}");
     }
 }
 // ANCHOR_END: BackgroundThreads
