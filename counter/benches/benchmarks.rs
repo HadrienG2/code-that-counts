@@ -1,10 +1,11 @@
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use hwloc2::{CpuBindFlags, CpuSet, ObjectType, Topology, TopologyObject};
+use rayon::ThreadPoolBuilder;
 use std::fmt::Write;
 
 pub fn criterion_benchmark(c: &mut Criterion) {
     // Construct benchmark set
-    let benchmarks = benchmarks();
+    let mut benchmarks = benchmarks();
 
     // Discover CPU topology and generate multithreading configurations, in
     // rough order of decreasing performance (so the benchmarks that take
@@ -34,59 +35,49 @@ pub fn criterion_benchmark(c: &mut Criterion) {
     cpusets.push((format!("{seq_cpuset}"), seq_cpuset));
 
     // Run benchmarks
-    let mut rayon_cpuset = None;
-    for (benchmark_name, mut benchmark) in benchmarks {
-        for size_pow2 in 0..=40 {
-            let size = 1 << size_pow2;
-            // Set up multithreading configuration
-            'thread: for (cpuset_name, cpuset) in cpusets.iter() {
-                topology
-                    .set_cpubind(cpuset.clone(), CpuBindFlags::CPUBIND_PROCESS)
-                    .unwrap();
+    for size_pow2 in 0..=40 {
+        let size = 1 << size_pow2;
+        // Set up multithreading configuration
+        for (cpuset_idx, (cpuset_name, cpuset)) in cpusets.iter().enumerate() {
+            topology
+                .set_cpubind(cpuset.clone(), CpuBindFlags::CPUBIND_PROCESS)
+                .unwrap();
+            'benchmarks: for (benchmark_name, benchmark) in &mut benchmarks {
+                // Set up the benchmark
+                let mut counter = match benchmark {
+                    Benchmark::Sequential(counter) => {
+                        if cpuset_idx > 0 {
+                            continue 'benchmarks;
+                        }
+                        Box::new(counter) as _
+                    }
+                    Benchmark::Parallel(factory) => factory(),
+                };
+
+                // Set up a custom Rayon thread pool for rayon tests
+                // (the global thread pool will not tolerate cpuset changes)
+                let rayon_pool = benchmark_name.starts_with("thread_rayon").then(|| {
+                    ThreadPoolBuilder::new()
+                        .num_threads(cpuset.weight() as usize)
+                        .build()
+                        .unwrap()
+                });
+
+                // Run the benchmark
                 let mut group_name = benchmark_name.to_string();
                 if !cpuset_name.is_empty() {
                     write!(&mut group_name, "{{{cpuset_name}}}").unwrap();
                 }
-
-                // Set up the benchmark
-                let (mut counter, threaded) = match &mut benchmark {
-                    Benchmark::Sequential(counter) => (Box::new(counter) as _, false),
-                    Benchmark::Parallel(factory) => (factory(), true),
-                };
-
-                // Mechanism to make sure that rayon is only tested with one
-                // cpuset, as its fixed-size global thread pool will not work
-                // correctly if the cpuset is swapped under its feet.
-                let mut rayon_cpuset_checked = false;
-                let mut check_rayon_cpuset = || {
-                    if !rayon_cpuset_checked {
-                        rayon_cpuset_checked = true;
-                        if benchmark_name.starts_with("thread_rayon") {
-                            if let Some(rayon_cpuset) = &rayon_cpuset {
-                                assert_eq!(
-                                    cpuset, rayon_cpuset,
-                                    "Don't test thread_rayon with multiple cpusets in one run"
-                                )
-                            } else {
-                                rayon_cpuset = Some(cpuset.clone())
-                            }
-                        }
-                    }
-                };
-
-                // Run the benchmark
                 let mut group = c.benchmark_group(group_name);
                 group.throughput(Throughput::Elements(size));
                 group.bench_with_input(BenchmarkId::from_parameter(size), &size, |b, &size| {
-                    check_rayon_cpuset();
-                    b.iter(|| counter(pessimize::hide(size)));
+                    let mut iter = || b.iter(|| counter(pessimize::hide(size)));
+                    if let Some(pool) = &rayon_pool {
+                        pool.install(iter)
+                    } else {
+                        iter()
+                    }
                 });
-
-                // Skip other multithreading configurations if this is a
-                // sequential benchmark
-                if !threaded {
-                    break 'thread;
-                }
             }
         }
     }
@@ -179,7 +170,7 @@ enum Benchmark {
     Parallel(CounterFactory),
 }
 //
-type CounterBox = Box<dyn FnMut(u64) -> u64>;
+type CounterBox = Box<dyn FnMut(u64) -> u64 + Send>;
 //
 type CounterFactory = Box<dyn FnMut() -> CounterBox>;
 
