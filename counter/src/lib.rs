@@ -829,9 +829,8 @@ impl<Counter: Fn(u64) -> u64 + Sync + 'static> Drop for BackgroundThreads<Counte
     fn drop(&mut self) {
         use std::sync::atomic::Ordering;
         debug_log(true, "sending the stop signal");
-        self.state.exit.store(true, Ordering::Release);
-        let _lock = self.state.locked.lock().unwrap();
-        self.state.start.notify_all();
+        self.state.exit.store(true, Ordering::Relaxed);
+        self.state.request.wait();
     }
 }
 
@@ -841,21 +840,6 @@ struct SharedState<Counter: Fn(u64) -> u64 + Sync> {
 
     /// Number of processing threads, including main thread
     num_threads: usize,
-
-    /// Number of worker threads that are not yet ready to take on a new job
-    ///
-    /// `num_busy` starts at `num_workers()`. Each time a thread is ready to
-    /// accept a new job, it decrements it. So when it reaches 0, it tells the
-    /// main thread that all worker threads are ready to accept a new job and
-    /// it can submit one.
-    ///
-    /// As worker threads accept the job, they increment `num_busy` back, so
-    /// when it reaches back `num_workers()`, it tells the worker threads that
-    /// last incremented it that it can reset `job`.
-    ///
-    /// Both of these events provide Acquire/Release synchronization.
-    ///
-    num_busy: atomic::Atomic<usize>,
 
     /// Number of worker threads that have work to do
     ///
@@ -890,9 +874,9 @@ struct SharedState<Counter: Fn(u64) -> u64 + Sync> {
     /// Computation result, synchronized using thread::park() and unpark().
     result: atomic::Atomic<u64>,
 
-    /// Worker threads that are waiting for a request from the main thread.
+    /// Mechanism for worker threads to await a request from the main thread.
     /// This can take the form of a counting job or a termination request.
-    start: std::sync::Condvar,
+    request: std::sync::Barrier,
 }
 //
 impl<Counter: Fn(u64) -> u64 + std::panic::RefUnwindSafe + Sync> SharedState<Counter> {
@@ -902,17 +886,16 @@ impl<Counter: Fn(u64) -> u64 + std::panic::RefUnwindSafe + Sync> SharedState<Cou
     /// Set up shared state
     pub fn new(counter: Counter, num_threads: usize) -> Self {
         use atomic::Atomic;
-        use std::sync::{Condvar, Mutex};
+        use std::sync::{Barrier, Mutex};
         Self {
             counter,
             num_threads,
-            num_busy: Atomic::new(num_threads - 1),
             num_working: Atomic::new(0),
             job: Atomic::new(Self::NO_JOB),
             exit: Atomic::new(false),
             locked: Mutex::new(LockedState),
             result: Atomic::default(),
-            start: Condvar::new(),
+            request: Barrier::new(num_threads),
         }
     }
 
@@ -930,40 +913,17 @@ impl<Counter: Fn(u64) -> u64 + std::panic::RefUnwindSafe + Sync> SharedState<Cou
             return 0;
         }
 
-        // Check and set up non-synchronization-critical parts of the shared state
-        debug_log(true, "preparing for a new job");
+        // Schedule job
+        debug_log(true, "scheduling a job");
         debug_assert_eq!(self.num_working.load(Ordering::Relaxed), 0);
         self.num_working.store(self.num_threads, Ordering::Relaxed);
-        debug_assert_eq!(self.job.load(Ordering::Relaxed), Self::NO_JOB);
+        self.job.store(target, Ordering::Relaxed);
         self.result.store(0, Ordering::Relaxed);
+        self.request.wait();
 
-        // Wait for worker threads to be ready
-        // It is okay to spin here because worker threads should go very quickly
-        // from emitting the result to decrementing num_busy.
-        debug_log(true, "waiting for threads to be ready");
-        assert!(
-            self.spin_wait(|| self.num_busy.load(Ordering::Relaxed) == 0),
-            "Worker has panicked"
-        );
-        atomic::fence(Ordering::Acquire);
-
-        // Wait for all worker threads to be sleeping on `start`
-        debug_log(true, "syncing up");
-        std::mem::drop(self.lock());
-
-        // Schedule job
-        debug_log(true, "starting previously prepared job");
-        self.job.store(target, Ordering::Release);
-        self.start.notify_all();
-
-        // Do our share of the work
-        let (lock, is_last) = self.process(target, 0);
-        std::mem::drop(lock);
-
-        // Is the job done yet?
-        if !is_last {
-            // If not, wait for workers to be done
-            debug_log(true, "waiting for result");
+        // Do our share of the work and wait for results
+        if !self.process(target, 0) {
+            debug_log(true, "waiting for results");
             assert!(
                 self.spin_wait(|| self.num_working.load(Ordering::Relaxed) == 0),
                 "Worker has panicked"
@@ -983,30 +943,15 @@ impl<Counter: Fn(u64) -> u64 + std::panic::RefUnwindSafe + Sync> SharedState<Cou
         // Normal operation
         if let Err(payload) = std::panic::catch_unwind(AssertUnwindSafe(|| {
             let thread_idx = thread_idx as u64;
-            let mut lock = self.lock();
-            // Wait for work
-            while let Some(target) = self.wait_for_work(lock) {
-                // Do our share of the counting work
-                let (new_lock, is_last) = self.process(target, thread_idx);
-                lock = new_lock;
-
-                // Are we the last one?
-                if !is_last {
-                    // If not, wait until it's safe to `wait_for_work()`
-                    debug_log(false, "waiting for job reset");
-                    std::mem::drop(lock);
-                    if !self.spin_wait(|| self.job.load(Ordering::Relaxed) == Self::NO_JOB) {
-                        break;
-                    }
-                    atomic::fence(Ordering::Acquire);
-                    lock = self.lock();
-                }
+            while let Some(target) = self.wait_for_work() {
+                self.process(target, thread_idx);
             }
+            debug_log(false, "shutting down normally");
         })) {
             // In case of panic, tell everyone else to stop and wake them up...
+            debug_log(false, "panicking");
             self.exit.store(true, Ordering::Relaxed);
-            std::mem::drop(self.locked.lock());
-            self.start.notify_all();
+            self.request.wait();
 
             // ...then go back to panicking
             std::panic::resume_unwind(payload);
@@ -1014,7 +959,7 @@ impl<Counter: Fn(u64) -> u64 + std::panic::RefUnwindSafe + Sync> SharedState<Cou
     }
 
     /// Process a task, then give away the lock and truth that the job is finished
-    fn process(&self, target: u64, thread_idx: u64) -> (std::sync::MutexGuard<LockedState>, bool) {
+    fn process(&self, target: u64, thread_idx: u64) -> bool {
         use atomic::Ordering;
 
         // Determine which share of the counting work we'll take
@@ -1024,70 +969,39 @@ impl<Counter: Fn(u64) -> u64 + std::panic::RefUnwindSafe + Sync> SharedState<Cou
         let share = base_share + (thread_idx < extra) as u64;
 
         // Do the counting work
+        let is_main = thread_idx == 0;
+        debug_log(is_main, "executing job");
         let result = (self.counter)(share);
 
-        // Merge results
-        let is_main = thread_idx == 0;
+        // Merge our partial result into the global result
         debug_log(is_main, "merging its result contribution");
-        let mut lock = self.lock();
+        let mut lock = self.lock_unwrap();
         lock.fetch_add(&self.result, result, Ordering::Relaxed);
 
         // Notify that we are done, check if the overall job is done
         debug_log(is_main, "done with its task");
-        let is_last = lock.fetch_dec(&self.num_working, Ordering::AcqRel);
-        (lock, is_last)
+        lock.fetch_dec(&self.num_working, Ordering::Release)
     }
 
-    /// Acquire shared state lock
-    fn lock(&self) -> std::sync::MutexGuard<LockedState> {
+    /// Acquire shared state lock, propagating panics
+    fn lock_unwrap(&self) -> std::sync::MutexGuard<LockedState> {
         self.locked.lock().unwrap()
     }
 
     /// Wait for a counting job or an exit signal
     ///
     /// This returns the full counting job, it is then up to this thread to
-    /// figure out its share of work from it.
+    /// figure out its share of work from it. None means the worker should stop.
     ///
-    fn wait_for_work(&self, mut lock: std::sync::MutexGuard<LockedState>) -> Option<u64> {
-        use atomic::{fence, Ordering};
+    fn wait_for_work(&self) -> Option<u64> {
+        use atomic::Ordering;
 
-        // Notify the main thread that we are ready
-        //
-        // Even if we were to switch to atomic increments, we'd still want
-        // to do this while holding the lock so that the main thread that
-        // sees us decrement it can synchronize with us waiting on the
-        // `start` condvar by acquiring the lock before notifying `start`.
-        //
-        debug_log(false, "ready to accept work");
-        lock.fetch_dec(&self.num_busy, Ordering::Release);
-
-        // Wait for the main thread to send work
-        let (mut job, mut exit) = (Self::NO_JOB, false);
-        lock = self
-            .start
-            .wait_while(lock, |_| {
-                job = self.job.load(Ordering::Relaxed);
-                exit = self.exit.load(Ordering::Relaxed);
-                job == Self::NO_JOB && !exit
-            })
-            .unwrap();
-        fence(Ordering::Acquire);
-
-        // Acknowledge the job, reset waiting state if we are last
-        debug_log(false, "up and running");
-        if lock.fetch_inc(&self.num_busy, Ordering::Release, self.num_workers()) {
-            fence(Ordering::Acquire);
-            debug_log(false, "resetting job input");
-            self.job.store(Self::NO_JOB, Ordering::Release);
-        }
+        // Wait for a request to come up
+        debug_log(false, "waiting for work");
+        self.request.wait();
 
         // Encode either job or termination request into a result
-        (!exit).then_some(job)
-    }
-
-    /// Number of worker threads
-    fn num_workers(&self) -> usize {
-        self.num_threads - 1
+        (!self.exit.load(Ordering::Relaxed)).then_some(self.job.load(Ordering::Relaxed))
     }
 
     /// Spin on some condition, abort and return false on termination request
@@ -1121,16 +1035,6 @@ impl LockedState {
     /// Specialization of fetch_update for counter decrement that goes to zero
     pub fn fetch_dec(&mut self, target: &atomic::Atomic<usize>, order: atomic::Ordering) -> bool {
         self.fetch_update(target, order, |old| old > 0, |old| old - 1) == 1
-    }
-
-    /// Specialization of fetch_update for counter increment that goes to a max
-    pub fn fetch_inc(
-        &mut self,
-        target: &atomic::Atomic<usize>,
-        order: atomic::Ordering,
-        max: usize,
-    ) -> bool {
-        self.fetch_update(target, order, |old| old < max, |old| old + 1) == max - 1
     }
 
     /// Specialization of fetch_update for result aggregation

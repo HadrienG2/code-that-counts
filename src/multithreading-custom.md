@@ -58,17 +58,17 @@ What are the main performance optimizations applied here?
   is used to reduce the need for atomic read-modify-write operations, which are
   expensive, as well as for lost wake-up prevention. Non-blocking access is used
   to read out state or overwrite it without looking at the existing value.
-- Condition variables are only used when   waiting for a job to come up, which
+- OS-mediated waiting is only used when waiting for a job to come up, which
   takes unbounded time. Other waits, which are expected to be very short, are
   handled through spinlocks instead.
 
 How well does this work out?
 
-- 2 well-pinned threads beat sequential counting above 256 thousand iterations.
-- 4 well-pinned threads do so above 1 million iterations.
-- 8 threads do so above 4 million iterations.
-- 16 hyperthreads do so above 8 million iterations.
+- 2 well-pinned threads beat sequential counting above 256 thousand iterations
+  (16x better).
+- 4 well-pinned threads do so above 1 million iterations (8x better).
+- 8 threads do so above 2 million iterations (8x better).
+- 16 hyperthreads do so above 8 million iterations, (4x better).
 
 So, with this specialized implementation, we've cut down the small-task overhead
-by a factor of around 4x with respect to the rayon version at higher thread
-counts, and 16x at low thread counts.
+by a sizable factor that goes up as the number of threads goes down.
