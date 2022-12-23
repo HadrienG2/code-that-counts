@@ -142,21 +142,21 @@ fn benchmarks() -> Vec<(&'static str, Benchmark)> {
             Benchmark::Parallel(Box::new(|| {
                 Box::new(|target| counter::thread_basic(target, counter::narrow_u8_tuned))
                     as CounterBox
-            }) as CounterFactory),
+            }) as _),
         ));
         benchmarks.push((
             "thread_rayon",
             Benchmark::Parallel(Box::new(|| {
                 Box::new(|target| counter::thread_rayon(target, counter::narrow_u8_tuned))
                     as CounterBox
-            }) as CounterFactory),
+            }) as _),
         ));
         benchmarks.push((
             "thread_bkg",
             Benchmark::Parallel(Box::new(|| {
                 let mut bkg = counter::BackgroundThreads::start(counter::narrow_u8_tuned);
                 Box::new(move |target| bkg.count(target)) as CounterBox
-            }) as CounterFactory),
+            }) as _),
         ));
     }
     benchmarks
