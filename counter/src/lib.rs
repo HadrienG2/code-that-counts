@@ -784,16 +784,21 @@ pub fn thread_rayon(target: u64, sequential: impl Fn(u64) -> u64 + Sync) -> u64 
 // ANCHOR_END: thread_rayon
 
 // ANCHOR: thread_custom
-pub struct BackgroundThreads<Counter: Fn(u64) -> u64 + std::panic::RefUnwindSafe + Sync + 'static> {
+pub struct BackgroundThreads<
+    Counter: Fn(u64) -> u64 + std::panic::RefUnwindSafe + Sync + 'static,
+    Barrier: JobBarrier,
+> {
     /// Worker threads
     _workers: Box<[std::thread::JoinHandle<()>]>,
 
     /// State shared with worker threads
-    state: std::sync::Arc<SharedState<Counter>>,
+    state: std::sync::Arc<SharedState<Counter, Barrier>>,
 }
 //
-impl<Counter: Fn(u64) -> u64 + std::panic::RefUnwindSafe + Send + Sync + 'static>
-    BackgroundThreads<Counter>
+impl<
+        Counter: Fn(u64) -> u64 + std::panic::RefUnwindSafe + Send + Sync + 'static,
+        Barrier: JobBarrier + Send + Sync + 'static,
+    > BackgroundThreads<Counter, Barrier>
 {
     /// Set up worker threads with a certain counter implementation
     pub fn start(counter: Counter) -> Self {
@@ -823,8 +828,8 @@ impl<Counter: Fn(u64) -> u64 + std::panic::RefUnwindSafe + Send + Sync + 'static
     }
 }
 //
-impl<Counter: Fn(u64) -> u64 + std::panic::RefUnwindSafe + Sync + 'static> Drop
-    for BackgroundThreads<Counter>
+impl<Counter: Fn(u64) -> u64 + std::panic::RefUnwindSafe + Sync + 'static, Barrier: JobBarrier> Drop
+    for BackgroundThreads<Counter, Barrier>
 {
     /// Tell worker threads to exit on Drop
     fn drop(&mut self) {
@@ -833,7 +838,7 @@ impl<Counter: Fn(u64) -> u64 + std::panic::RefUnwindSafe + Sync + 'static> Drop
 }
 
 /// State shared between the main thread and worker threads
-struct SharedState<Counter: Fn(u64) -> u64 + Sync> {
+struct SharedState<Counter: Fn(u64) -> u64 + Sync, Barrier> {
     /// Counter implementation
     counter: Counter,
 
@@ -841,7 +846,7 @@ struct SharedState<Counter: Fn(u64) -> u64 + Sync> {
     num_threads: usize,
 
     /// Mechanism to synchronize at the start and end of jobs
-    job_barrier: BasicJobBarrier,
+    job_barrier: Barrier,
 
     /// Computation result, synchronized using `num_working`
     result: atomic::Atomic<u64>,
@@ -854,7 +859,9 @@ struct SharedState<Counter: Fn(u64) -> u64 + Sync> {
     locked: std::sync::Mutex<LockedOps>,
 }
 //
-impl<Counter: Fn(u64) -> u64 + std::panic::RefUnwindSafe + Sync> SharedState<Counter> {
+impl<Counter: Fn(u64) -> u64 + std::panic::RefUnwindSafe + Sync, Barrier: JobBarrier>
+    SharedState<Counter, Barrier>
+{
     /// Set up shared state
     pub fn new(counter: Counter, num_threads: usize) -> Self {
         use atomic::Atomic;
@@ -862,7 +869,7 @@ impl<Counter: Fn(u64) -> u64 + std::panic::RefUnwindSafe + Sync> SharedState<Cou
         Self {
             counter,
             num_threads,
-            job_barrier: BasicJobBarrier::new(num_threads),
+            job_barrier: Barrier::new(num_threads),
             result: Atomic::default(),
             locked: Mutex::new(LockedOps),
         }
@@ -879,7 +886,7 @@ impl<Counter: Fn(u64) -> u64 + std::panic::RefUnwindSafe + Sync> SharedState<Cou
         use atomic::Ordering;
 
         // Handle sequential special cases
-        if self.num_threads == 1 || target <= BasicJobBarrier::MIN_PARALLEL_TARGET {
+        if self.num_threads == 1 || target < BasicJobBarrier::MIN_TARGET {
             return (self.counter)(target);
         }
 
@@ -905,7 +912,7 @@ impl<Counter: Fn(u64) -> u64 + std::panic::RefUnwindSafe + Sync> SharedState<Cou
             // Normal work loop
             let thread_idx = thread_idx as u64;
             debug_log(false, "waiting for the first job");
-            while let Some(target) = self.job_barrier.wait_for_start() {
+            while let Some(target) = self.job_barrier.wait_for_task() {
                 self.process(target, thread_idx);
                 debug_log(false, "waiting for the next job")
             }
@@ -938,7 +945,7 @@ impl<Counter: Fn(u64) -> u64 + std::panic::RefUnwindSafe + Sync> SharedState<Cou
 
         // Notify that we are done, check if the overall job is done
         debug_log(is_main, "done with its task");
-        self.job_barrier.finish(lock)
+        self.job_barrier.finish_task(lock)
     }
 
     /// Acquire shared state lock, propagating panics
@@ -948,7 +955,7 @@ impl<Counter: Fn(u64) -> u64 + std::panic::RefUnwindSafe + Sync> SharedState<Cou
 }
 
 /// Lock-protected operations
-struct LockedOps;
+pub struct LockedOps;
 //
 impl LockedOps {
     /// Specialization of fetch_update for counter decrement that goes to zero
@@ -996,8 +1003,36 @@ impl LockedOps {
     }
 }
 
-/// Basic implementation of blocking synchronization at start and end of tasks
-struct BasicJobBarrier {
+/// General interface for blocking synchronization as start and end of tasks
+pub trait JobBarrier {
+    /// Set up synchronization
+    fn new(num_threads: usize) -> Self;
+
+    /// Minimum accepted parallel job size, please run smaller jobs sequentially
+    const MIN_TARGET: u64;
+
+    /// Start a job
+    fn start(&self, target: u64, num_threads: usize);
+
+    /// Stop all threads
+    fn stop(&self);
+
+    /// Wait for a counting job (Some(u64)) or an exit signal (None)
+    ///
+    /// This returns the full counting job, it is then up to this thread to
+    /// figure out its share of work from it. None means the worker should stop.
+    ///
+    fn wait_for_task(&self) -> Option<u64>;
+
+    /// Notify other threads that we are finished, tell if we were last
+    fn finish_task(&self, lock: std::sync::MutexGuard<LockedOps>) -> bool;
+
+    /// Wait for other worker threads to finish processing the job
+    fn wait_for_end(&self);
+}
+
+/// Basic JobBarrier implementation, to be refined later on
+pub struct BasicJobBarrier {
     /// Number of worker threads that have work to do
     ///
     /// `num_working` is set to `num_threads` when work is submitted. Each time
@@ -1019,9 +1054,8 @@ struct BasicJobBarrier {
     barrier: std::sync::Barrier,
 }
 //
-impl BasicJobBarrier {
-    /// Set up barrier
-    pub fn new(num_threads: usize) -> Self {
+impl JobBarrier for BasicJobBarrier {
+    fn new(num_threads: usize) -> Self {
         use atomic::Atomic;
         use std::sync::Barrier;
         Self {
@@ -1031,32 +1065,24 @@ impl BasicJobBarrier {
         }
     }
 
-    /// Minimum accepted parallel job size, execute smaller jobs sequentially
-    pub const MIN_PARALLEL_TARGET: u64 = Self::STOP_REQUEST + 1;
+    const MIN_TARGET: u64 = Self::STOP_REQUEST + 1;
 
-    /// Start a job
-    pub fn start(&self, target: u64, num_threads: usize) {
+    fn start(&self, target: u64, num_threads: usize) {
         use atomic::Ordering;
-        assert!(target >= Self::MIN_PARALLEL_TARGET);
+        assert!(target >= Self::MIN_TARGET);
         debug_assert_eq!(self.num_working.load(Ordering::Relaxed), 0);
         self.num_working.store(num_threads, Ordering::Relaxed);
         self.request.store(target, Ordering::Relaxed);
         self.barrier.wait();
     }
 
-    /// Ask all worker threads to stop
-    pub fn stop(&self) {
+    fn stop(&self) {
         self.request
             .store(Self::STOP_REQUEST, atomic::Ordering::Relaxed);
         self.barrier.wait();
     }
 
-    /// Wait for a counting job or an exit signal
-    ///
-    /// This returns the full counting job, it is then up to this thread to
-    /// figure out its share of work from it. None means the worker should stop.
-    ///
-    pub fn wait_for_start(&self) -> Option<u64> {
+    fn wait_for_task(&self) -> Option<u64> {
         let mut request = Self::NO_REQUEST;
         while request == Self::NO_REQUEST {
             self.barrier.wait();
@@ -1065,48 +1091,52 @@ impl BasicJobBarrier {
         (request > Self::STOP_REQUEST).then_some(request)
     }
 
-    /// Notify other threads that we are finished, tell if we were last
-    pub fn finish(&self, mut lock: std::sync::MutexGuard<LockedOps>) -> bool {
+    fn finish_task(&self, mut lock: std::sync::MutexGuard<LockedOps>) -> bool {
         lock.fetch_dec(&self.num_working, atomic::Ordering::Release)
     }
 
-    /// Wait for other worker threads to finish processing the job
-    pub fn wait_for_end(&self) {
+    fn wait_for_end(&self) {
         use atomic::Ordering;
         assert!(
-            self.spin_wait(|| self.num_working.load(Ordering::Relaxed) == 0),
-            "Worker has panicked"
+            spin_wait(|| if self.num_working.load(Ordering::Relaxed) == 0 {
+                Some(true)
+            } else if self.request.load(Ordering::Relaxed) == Self::STOP_REQUEST {
+                Some(false)
+            } else {
+                None
+            }),
+            "Job aborted"
         );
         atomic::fence(Ordering::Acquire);
     }
-
+}
+//
+impl BasicJobBarrier {
     /// Special value of `request` that means there is no request
     const NO_REQUEST: u64 = 0;
 
     /// Special value of `request` that means threads should exit
     const STOP_REQUEST: u64 = 1;
+}
 
-    /// Spin on some condition, abort and return false on termination request
-    fn spin_wait(&self, mut termination: impl FnMut() -> bool) -> bool {
-        use atomic::Ordering;
-
-        // Start with a spin loop with exponential backoff
-        for backoff in 0..3 {
-            if termination() {
-                return true;
-            }
-            for _ in 0..1 << backoff {
-                std::hint::spin_loop();
-            }
+/// Spin-lock waitinf for some termination condition
+fn spin_wait<T>(mut termination: impl FnMut() -> Option<T>) -> T {
+    // Start with a spin loop with exponential backoff
+    for backoff in 0..3 {
+        if let Some(value) = termination() {
+            return value;
         }
-
-        // Switch to yielding to the OS once it's clear it's gonna take a while
-        let mut exit = false;
-        while !(termination() || exit) {
-            exit = self.request.load(Ordering::Relaxed) == Self::STOP_REQUEST;
-            std::thread::yield_now();
+        for _ in 0..1 << backoff {
+            std::hint::spin_loop();
         }
-        !exit
+    }
+
+    // Switch to yielding to the OS once it's clear it's gonna take a while
+    loop {
+        if let Some(value) = termination() {
+            return value;
+        }
+        std::thread::yield_now();
     }
 }
 // ANCHOR_END: thread_custom
@@ -1205,7 +1235,7 @@ mod tests {
     #[cfg(target_feature = "avx2")]
     mod avx2 {
         use super::*;
-        use crate::BackgroundThreads;
+        use crate::{BackgroundThreads, BasicJobBarrier};
         use once_cell::sync::Lazy;
         use std::sync::Mutex;
 
@@ -1229,11 +1259,12 @@ mod tests {
         fn thread_custom(target: u32) -> TestResult {
             use std::panic::RefUnwindSafe;
             type CounterBox = Box<dyn Fn(u64) -> u64 + RefUnwindSafe + Send + Sync + 'static>;
-            static BACKGROUND: Lazy<Mutex<BackgroundThreads<CounterBox>>> = Lazy::new(|| {
-                Mutex::new(BackgroundThreads::start(
-                    Box::new(crate::narrow_u8_tuned) as _
-                ))
-            });
+            static BACKGROUND: Lazy<Mutex<BackgroundThreads<CounterBox, BasicJobBarrier>>> =
+                Lazy::new(|| {
+                    Mutex::new(BackgroundThreads::start(
+                        Box::new(crate::narrow_u8_tuned) as _
+                    ))
+                });
             let mut lock = BACKGROUND.lock().unwrap();
             test_counter(target, |target| lock.count(target))
         }

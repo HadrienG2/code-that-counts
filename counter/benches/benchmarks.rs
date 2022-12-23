@@ -154,7 +154,9 @@ fn benchmarks() -> Vec<(&'static str, Benchmark)> {
         benchmarks.push((
             "thread_custom",
             Benchmark::Parallel(Box::new(|| {
-                let mut bkg = counter::BackgroundThreads::start(counter::narrow_u8_tuned);
+                let mut bkg = counter::BackgroundThreads::<_, counter::BasicJobBarrier>::start(
+                    counter::narrow_u8_tuned,
+                );
                 Box::new(move |target| bkg.count(target)) as CounterBox
             }) as _),
         ));
