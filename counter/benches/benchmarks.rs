@@ -152,7 +152,7 @@ fn benchmarks() -> Vec<(&'static str, Benchmark)> {
             }) as _),
         ));
         benchmarks.push((
-            "thread_bkg",
+            "thread_custom",
             Benchmark::Parallel(Box::new(|| {
                 let mut bkg = counter::BackgroundThreads::start(counter::narrow_u8_tuned);
                 Box::new(move |target| bkg.count(target)) as CounterBox

@@ -783,7 +783,7 @@ pub fn thread_rayon(target: u64, sequential: impl Fn(u64) -> u64 + Sync) -> u64 
 }
 // ANCHOR_END: thread_rayon
 
-// ANCHOR: BackgroundThreads
+// ANCHOR: thread_custom
 pub struct BackgroundThreads<Counter: Fn(u64) -> u64 + Sync + 'static> {
     /// Worker threads
     _workers: Box<[std::thread::JoinHandle<()>]>,
@@ -792,7 +792,9 @@ pub struct BackgroundThreads<Counter: Fn(u64) -> u64 + Sync + 'static> {
     state: std::sync::Arc<SharedState<Counter>>,
 }
 //
-impl<Counter: Fn(u64) -> u64 + Send + Sync + 'static> BackgroundThreads<Counter> {
+impl<Counter: Fn(u64) -> u64 + std::panic::RefUnwindSafe + Send + Sync + 'static>
+    BackgroundThreads<Counter>
+{
     /// Set up worker threads with a certain counter implementation
     pub fn start(counter: Counter) -> Self {
         use std::{sync::Arc, thread};
@@ -879,9 +881,9 @@ struct SharedState<Counter: Fn(u64) -> u64 + Sync> {
 
     /// State protection mutex
     ///
-    /// Besides its role in protecting concurrent accesses to the main thread
-    /// identifier, this mutex is also used to reduce the number of expensive
-    /// atomic read-modify-write operations by protecting writes to atomics.
+    /// This mutex is not used to protect access to fully unsynchronized state,
+    /// but rather to optimize batches of atomic read-modify-write operations
+    /// and as part of `start`'s synchronization protocol.
     ///
     locked: std::sync::Mutex<LockedState>,
 
@@ -893,7 +895,7 @@ struct SharedState<Counter: Fn(u64) -> u64 + Sync> {
     start: std::sync::Condvar,
 }
 //
-impl<Counter: Fn(u64) -> u64 + Sync> SharedState<Counter> {
+impl<Counter: Fn(u64) -> u64 + std::panic::RefUnwindSafe + Sync> SharedState<Counter> {
     /// Special value of `job` that means "no job right now"
     const NO_JOB: u64 = 0;
 
@@ -908,7 +910,7 @@ impl<Counter: Fn(u64) -> u64 + Sync> SharedState<Counter> {
             num_working: Atomic::new(0),
             job: Atomic::new(Self::NO_JOB),
             exit: Atomic::new(false),
-            locked: Mutex::new(LockedState { caller: None }),
+            locked: Mutex::new(LockedState),
             result: Atomic::default(),
             start: Condvar::new(),
         }
@@ -933,44 +935,40 @@ impl<Counter: Fn(u64) -> u64 + Sync> SharedState<Counter> {
         debug_assert_eq!(self.num_working.load(Ordering::Relaxed), 0);
         self.num_working.store(self.num_threads, Ordering::Relaxed);
         debug_assert_eq!(self.job.load(Ordering::Relaxed), Self::NO_JOB);
-        debug_assert_eq!(self.exit.load(Ordering::Relaxed), false);
         self.result.store(0, Ordering::Relaxed);
 
         // Wait for worker threads to be ready
         // It is okay to spin here because worker threads should go very quickly
         // from emitting the result to decrementing num_busy.
         debug_log(true, "waiting for threads to be ready");
-        Self::spin_wait(|| self.num_busy.load(Ordering::Relaxed) == 0);
+        assert!(
+            self.spin_wait(|| self.num_busy.load(Ordering::Relaxed) == 0),
+            "Worker has panicked"
+        );
         atomic::fence(Ordering::Acquire);
 
-        // Wait for all worker threads to be sleeping on `start`,
-        // then use the fact we hold the lock to broadcast our ID
-        debug_log(true, "syncing up and publishing its ID");
-        {
-            let mut lock = self.lock();
-            debug_assert!(lock.caller.is_none());
-            lock.caller = Some(std::thread::current());
-        }
+        // Wait for all worker threads to be sleeping on `start`
+        debug_log(true, "syncing up");
+        std::mem::drop(self.lock());
 
         // Schedule job
-        // TODO: Could reduce futex overhead here by making workers spin
         debug_log(true, "starting previously prepared job");
         self.job.store(target, Ordering::Release);
         self.start.notify_all();
 
         // Do our share of the work
-        let (mut lock, is_last) = self.process(target, 0);
+        let (lock, is_last) = self.process(target, 0);
+        std::mem::drop(lock);
 
         // Is the job done yet?
-        if is_last {
-            // If so, no need for wakeup, drop the park token
-            lock.caller = None;
-        } else {
+        if !is_last {
             // If not, wait for workers to be done
-            // NOTE: Futex overhead here is hard to avoid and actually okay?
             debug_log(true, "waiting for result");
-            std::mem::drop(lock);
-            std::thread::park();
+            assert!(
+                self.spin_wait(|| self.num_working.load(Ordering::Relaxed) == 0),
+                "Worker has panicked"
+            );
+            atomic::fence(Ordering::Acquire);
         }
 
         // Fetch result, piggybacking on thread::park()'s Acquire barrier
@@ -980,28 +978,38 @@ impl<Counter: Fn(u64) -> u64 + Sync> SharedState<Counter> {
     /// Worker thread logic
     pub fn worker(&self, thread_idx: usize) {
         use atomic::Ordering;
+        use std::panic::AssertUnwindSafe;
 
-        // FIXME: Handle worker panics
-        let thread_idx = thread_idx as u64;
-        let mut lock = self.lock();
-        while let Some(target) = self.wait_for_work(lock) {
-            // Do our share of the counting work
-            let (new_lock, is_last) = self.process(target, thread_idx);
-            lock = new_lock;
+        // Normal operation
+        if let Err(payload) = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            let thread_idx = thread_idx as u64;
+            let mut lock = self.lock();
+            // Wait for work
+            while let Some(target) = self.wait_for_work(lock) {
+                // Do our share of the counting work
+                let (new_lock, is_last) = self.process(target, thread_idx);
+                lock = new_lock;
 
-            // Are we finished?
-            if is_last {
-                // If so, wake up the main thread
-                debug_log(false, "waking up the main thread");
-                lock.caller.take().unwrap().unpark();
-            } else {
-                // ...otherwise, wait until it's safe to `wait_for_work()`
-                debug_log(false, "waiting for job reset");
-                std::mem::drop(lock);
-                Self::spin_wait(|| self.job.load(Ordering::Relaxed) == Self::NO_JOB);
-                atomic::fence(Ordering::Acquire);
-                lock = self.lock();
+                // Are we the last one?
+                if !is_last {
+                    // If not, wait until it's safe to `wait_for_work()`
+                    debug_log(false, "waiting for job reset");
+                    std::mem::drop(lock);
+                    if !self.spin_wait(|| self.job.load(Ordering::Relaxed) == Self::NO_JOB) {
+                        break;
+                    }
+                    atomic::fence(Ordering::Acquire);
+                    lock = self.lock();
+                }
             }
+        })) {
+            // In case of panic, tell everyone else to stop and wake them up...
+            self.exit.store(true, Ordering::Relaxed);
+            std::mem::drop(self.locked.lock());
+            self.start.notify_all();
+
+            // ...then go back to panicking
+            std::panic::resume_unwind(payload);
         }
     }
 
@@ -1082,12 +1090,14 @@ impl<Counter: Fn(u64) -> u64 + Sync> SharedState<Counter> {
         self.num_threads - 1
     }
 
-    /// Spin on some condition
-    fn spin_wait(mut termination: impl FnMut() -> bool) {
+    /// Spin on some condition, abort and return false on termination request
+    fn spin_wait(&self, mut termination: impl FnMut() -> bool) -> bool {
+        use atomic::Ordering;
+
         // Start with a spin loop with exponential backoff
         for backoff in 0..3 {
             if termination() {
-                return;
+                return true;
             }
             for _ in 0..1 << backoff {
                 std::hint::spin_loop();
@@ -1095,17 +1105,17 @@ impl<Counter: Fn(u64) -> u64 + Sync> SharedState<Counter> {
         }
 
         // Switch to yielding to the OS once it's clear it's gonna take a while
-        while !termination() {
+        let mut exit = false;
+        while !(termination() || exit) {
+            exit = self.exit.load(Ordering::Relaxed);
             std::thread::yield_now();
         }
+        !exit
     }
 }
 
 /// Lock-protected state and operations
-struct LockedState {
-    /// Mechanism to wake up the main thread
-    caller: Option<std::thread::Thread>,
-}
+struct LockedState;
 //
 impl LockedState {
     /// Specialization of fetch_update for counter decrement that goes to zero
@@ -1162,6 +1172,7 @@ impl LockedState {
         }
     }
 }
+// ANCHOR_END: thread_custom
 
 /// Debug logging
 fn debug_log(main: bool, action: &str) {
@@ -1176,7 +1187,6 @@ fn debug_log(main: bool, action: &str) {
         eprintln!(" is {action}");
     }
 }
-// ANCHOR_END: BackgroundThreads
 
 #[cfg(test)]
 mod tests {
@@ -1279,8 +1289,9 @@ mod tests {
         );
 
         #[quickcheck]
-        fn thread_bkg(target: u32) -> TestResult {
-            type CounterBox = Box<dyn Fn(u64) -> u64 + Send + Sync + 'static>;
+        fn thread_custom(target: u32) -> TestResult {
+            use std::panic::RefUnwindSafe;
+            type CounterBox = Box<dyn Fn(u64) -> u64 + RefUnwindSafe + Send + Sync + 'static>;
             static BACKGROUND: Lazy<Mutex<BackgroundThreads<CounterBox>>> = Lazy::new(|| {
                 Mutex::new(BackgroundThreads::start(
                     Box::new(crate::narrow_u8_tuned) as _
