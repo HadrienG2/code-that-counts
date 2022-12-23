@@ -784,7 +784,7 @@ pub fn thread_rayon(target: u64, sequential: impl Fn(u64) -> u64 + Sync) -> u64 
 // ANCHOR_END: thread_rayon
 
 // ANCHOR: thread_custom
-pub struct BackgroundThreads<Counter: Fn(u64) -> u64 + Sync + 'static> {
+pub struct BackgroundThreads<Counter: Fn(u64) -> u64 + std::panic::RefUnwindSafe + Sync + 'static> {
     /// Worker threads
     _workers: Box<[std::thread::JoinHandle<()>]>,
 
@@ -823,14 +823,12 @@ impl<Counter: Fn(u64) -> u64 + std::panic::RefUnwindSafe + Send + Sync + 'static
     }
 }
 //
-impl<Counter: Fn(u64) -> u64 + Sync + 'static> Drop for BackgroundThreads<Counter> {
+impl<Counter: Fn(u64) -> u64 + std::panic::RefUnwindSafe + Sync + 'static> Drop
+    for BackgroundThreads<Counter>
+{
     /// Tell worker threads to exit on Drop
-    /// Need to lock before notifying to avoid lost wakeups.
     fn drop(&mut self) {
-        use std::sync::atomic::Ordering;
-        debug_log(true, "sending the stop signal");
-        self.state.exit.store(true, Ordering::Relaxed);
-        self.state.request.wait();
+        self.state.stop(0)
     }
 }
 
@@ -851,10 +849,11 @@ struct SharedState<Counter: Fn(u64) -> u64 + Sync> {
     num_working: atomic::Atomic<usize>,
 
     /// Requested or ongoing computation
-    job: atomic::Atomic<u64>,
-
-    /// Signal telling threads to stop
-    exit: atomic::Atomic<bool>,
+    ///
+    /// This variable has two special values: 0 means no request and 1 means a
+    /// request to stop
+    ///
+    request: atomic::Atomic<u64>,
 
     /// State protection mutex
     ///
@@ -869,10 +868,16 @@ struct SharedState<Counter: Fn(u64) -> u64 + Sync> {
 
     /// Mechanism for worker threads to await a request from the main thread.
     /// This can take the form of a counting job or a termination request.
-    request: std::sync::Barrier,
+    barrier: std::sync::Barrier,
 }
 //
 impl<Counter: Fn(u64) -> u64 + std::panic::RefUnwindSafe + Sync> SharedState<Counter> {
+    /// Special value of `request` that means there is no request
+    const NO_REQUEST: u64 = 0;
+
+    /// Special value of `request` that means threads should exit
+    const STOP_REQUEST: u64 = 1;
+
     /// Set up shared state
     pub fn new(counter: Counter, num_threads: usize) -> Self {
         use atomic::Atomic;
@@ -881,20 +886,27 @@ impl<Counter: Fn(u64) -> u64 + std::panic::RefUnwindSafe + Sync> SharedState<Cou
             counter,
             num_threads,
             num_working: Atomic::new(0),
-            job: Atomic::default(),
-            exit: Atomic::new(false),
+            request: Atomic::new(Self::NO_REQUEST),
             locked: Mutex::new(LockedState),
             result: Atomic::default(),
-            request: Barrier::new(num_threads),
+            barrier: Barrier::new(num_threads),
         }
+    }
+
+    /// Request worker threads to stop
+    pub fn stop(&self, thread_idx: usize) {
+        use std::sync::atomic::Ordering;
+        debug_log(thread_idx == 0, "sending the stop signal");
+        self.request.store(Self::STOP_REQUEST, Ordering::Relaxed);
+        self.barrier.wait();
     }
 
     /// Schedule counting work and wait for the end result
     pub fn count(&self, target: u64) -> u64 {
         use atomic::Ordering;
 
-        // Single-threaded fast path
-        if self.num_threads == 1 {
+        // Sequential special cases
+        if self.num_threads == 1 || target <= Self::STOP_REQUEST {
             return (self.counter)(target);
         }
 
@@ -902,9 +914,9 @@ impl<Counter: Fn(u64) -> u64 + std::panic::RefUnwindSafe + Sync> SharedState<Cou
         debug_log(true, "scheduling a job");
         debug_assert_eq!(self.num_working.load(Ordering::Relaxed), 0);
         self.num_working.store(self.num_threads, Ordering::Relaxed);
-        self.job.store(target, Ordering::Relaxed);
+        self.request.store(target, Ordering::Relaxed);
         self.result.store(0, Ordering::Relaxed);
-        self.request.wait();
+        self.barrier.wait();
 
         // Do our share of the work and wait for results
         if !self.process(target, 0) {
@@ -922,23 +934,19 @@ impl<Counter: Fn(u64) -> u64 + std::panic::RefUnwindSafe + Sync> SharedState<Cou
 
     /// Worker thread logic
     pub fn worker(&self, thread_idx: usize) {
-        use atomic::Ordering;
         use std::panic::AssertUnwindSafe;
 
-        // Normal operation
         if let Err(payload) = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            // Normal work loop
             let thread_idx = thread_idx as u64;
             while let Some(target) = self.wait_for_work() {
                 self.process(target, thread_idx);
             }
             debug_log(false, "shutting down normally");
         })) {
-            // In case of panic, tell everyone else to stop and wake them up...
+            // In case of panic, tell others to stop before unwinding
             debug_log(false, "panicking");
-            self.exit.store(true, Ordering::Relaxed);
-            self.request.wait();
-
-            // ...then go back to panicking
+            self.stop(thread_idx);
             std::panic::resume_unwind(payload);
         }
     }
@@ -983,10 +991,14 @@ impl<Counter: Fn(u64) -> u64 + std::panic::RefUnwindSafe + Sync> SharedState<Cou
 
         // Wait for a request to come up
         debug_log(false, "waiting for work");
-        self.request.wait();
+        let mut request = Self::NO_REQUEST;
+        while request == Self::NO_REQUEST {
+            self.barrier.wait();
+            request = self.request.load(Ordering::Relaxed);
+        }
 
         // Encode either job or termination request into a result
-        (!self.exit.load(Ordering::Relaxed)).then_some(self.job.load(Ordering::Relaxed))
+        (request > Self::STOP_REQUEST).then_some(request)
     }
 
     /// Spin on some condition, abort and return false on termination request
@@ -1006,7 +1018,7 @@ impl<Counter: Fn(u64) -> u64 + std::panic::RefUnwindSafe + Sync> SharedState<Cou
         // Switch to yielding to the OS once it's clear it's gonna take a while
         let mut exit = false;
         while !(termination() || exit) {
-            exit = self.exit.load(Ordering::Relaxed);
+            exit = self.request.load(Ordering::Relaxed) == Self::STOP_REQUEST;
             std::thread::yield_now();
         }
         !exit
