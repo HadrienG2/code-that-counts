@@ -11,8 +11,8 @@
     * [Narrow](./simd-narrowing.md)
 - [Multithreading (WIP)](./multithreading.md)
     * [Rayon](./multithreading-rayon.md)
-    * [Custom](./multithreading-custom.md)
-    * [OS-specific (WIP)](./multithreading-os.md)
+    * [Custom thread pool](./multithreading-pool.md)
+    * [Custom synchronization (WIP)](./multithreading-sync.md)
     * [Streaming (WIP)](./multithreading-streaming.md)
     * [TODO]()
 

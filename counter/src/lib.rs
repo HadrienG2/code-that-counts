@@ -850,17 +850,10 @@ struct SharedState<Counter: Fn(u64) -> u64 + Sync> {
     ///
     num_working: atomic::Atomic<usize>,
 
-    /// Requested or ongoing computation, 0 means no pending request
-    ///
-    /// Used to publish new jobs, then reset once all threads have fetched
-    /// the job. Both events are signaled with Acquire/Release synchronization.
-    ///
+    /// Requested or ongoing computation
     job: atomic::Atomic<u64>,
 
     /// Signal telling threads to stop
-    ///
-    /// Stop signals are raised with Acquire/Release synchronization.
-    ///
     exit: atomic::Atomic<bool>,
 
     /// State protection mutex
@@ -871,7 +864,7 @@ struct SharedState<Counter: Fn(u64) -> u64 + Sync> {
     ///
     locked: std::sync::Mutex<LockedState>,
 
-    /// Computation result, synchronized using thread::park() and unpark().
+    /// Computation result, synchronized using `num_working`
     result: atomic::Atomic<u64>,
 
     /// Mechanism for worker threads to await a request from the main thread.
@@ -880,9 +873,6 @@ struct SharedState<Counter: Fn(u64) -> u64 + Sync> {
 }
 //
 impl<Counter: Fn(u64) -> u64 + std::panic::RefUnwindSafe + Sync> SharedState<Counter> {
-    /// Special value of `job` that means "no job right now"
-    const NO_JOB: u64 = 0;
-
     /// Set up shared state
     pub fn new(counter: Counter, num_threads: usize) -> Self {
         use atomic::Atomic;
@@ -891,7 +881,7 @@ impl<Counter: Fn(u64) -> u64 + std::panic::RefUnwindSafe + Sync> SharedState<Cou
             counter,
             num_threads,
             num_working: Atomic::new(0),
-            job: Atomic::new(Self::NO_JOB),
+            job: Atomic::default(),
             exit: Atomic::new(false),
             locked: Mutex::new(LockedState),
             result: Atomic::default(),
@@ -906,11 +896,6 @@ impl<Counter: Fn(u64) -> u64 + std::panic::RefUnwindSafe + Sync> SharedState<Cou
         // Single-threaded fast path
         if self.num_threads == 1 {
             return (self.counter)(target);
-        }
-
-        // Special-case empty job, freeing up `job` == 0 to mean "no job"
-        if target == 0 {
-            return 0;
         }
 
         // Schedule job

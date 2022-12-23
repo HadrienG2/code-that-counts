@@ -1,4 +1,4 @@
-# Custom code
+# Custom thread pool
 
 Using rayon makes it a lot cheaper to spawn parallel tasks than explicitly
 spawning threads on every counting run, but cheaper is not free.
