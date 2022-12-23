@@ -832,6 +832,7 @@ impl<Counter: Fn(u64) -> u64 + std::panic::RefUnwindSafe + Sync + 'static> Drop
     }
 }
 
+/// State shared between the main thread and worker threads
 struct SharedState<Counter: Fn(u64) -> u64 + Sync> {
     /// Counter implementation
     counter: Counter,
@@ -851,23 +852,22 @@ struct SharedState<Counter: Fn(u64) -> u64 + Sync> {
     /// Requested or ongoing computation
     ///
     /// This variable has two special values: 0 means no request and 1 means a
-    /// request to stop
+    /// request to stop.
     ///
     request: atomic::Atomic<u64>,
 
     /// State protection mutex
     ///
     /// This mutex is not used to protect access to fully unsynchronized state,
-    /// but rather to optimize batches of atomic read-modify-write operations
-    /// and as part of `start`'s synchronization protocol.
+    /// but rather to optimize batches of atomic read-modify-write operations.
     ///
-    locked: std::sync::Mutex<LockedState>,
+    locked: std::sync::Mutex<LockedOps>,
 
     /// Computation result, synchronized using `num_working`
     result: atomic::Atomic<u64>,
 
-    /// Mechanism for worker threads to await a request from the main thread.
-    /// This can take the form of a counting job or a termination request.
+    /// Mechanism for worker threads to await a request.
+    /// This can take the form of an incoming job or a termination request.
     barrier: std::sync::Barrier,
 }
 //
@@ -887,7 +887,7 @@ impl<Counter: Fn(u64) -> u64 + std::panic::RefUnwindSafe + Sync> SharedState<Cou
             num_threads,
             num_working: Atomic::new(0),
             request: Atomic::new(Self::NO_REQUEST),
-            locked: Mutex::new(LockedState),
+            locked: Mutex::new(LockedOps),
             result: Atomic::default(),
             barrier: Barrier::new(num_threads),
         }
@@ -977,7 +977,7 @@ impl<Counter: Fn(u64) -> u64 + std::panic::RefUnwindSafe + Sync> SharedState<Cou
     }
 
     /// Acquire shared state lock, propagating panics
-    fn lock_unwrap(&self) -> std::sync::MutexGuard<LockedState> {
+    fn lock_unwrap(&self) -> std::sync::MutexGuard<LockedOps> {
         self.locked.lock().unwrap()
     }
 
@@ -1025,10 +1025,10 @@ impl<Counter: Fn(u64) -> u64 + std::panic::RefUnwindSafe + Sync> SharedState<Cou
     }
 }
 
-/// Lock-protected state and operations
-struct LockedState;
+/// Lock-protected operations
+struct LockedOps;
 //
-impl LockedState {
+impl LockedOps {
     /// Specialization of fetch_update for counter decrement that goes to zero
     pub fn fetch_dec(&mut self, target: &atomic::Atomic<usize>, order: atomic::Ordering) -> bool {
         self.fetch_update(target, order, |old| old > 0, |old| old - 1) == 1
