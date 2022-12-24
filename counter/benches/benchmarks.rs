@@ -154,7 +154,7 @@ fn benchmarks() -> Vec<(&'static str, Benchmark)> {
         benchmarks.push((
             "thread_pool",
             Benchmark::Parallel(Box::new(|| {
-                let mut bkg = counter::BackgroundThreads::<_, counter::BasicBarrier>::start(
+                let mut bkg = counter::BackgroundThreads::<_, counter::BasicScheduler>::start(
                     counter::narrow_u8_tuned,
                 );
                 Box::new(move |target| bkg.count(target)) as CounterBox
@@ -163,7 +163,7 @@ fn benchmarks() -> Vec<(&'static str, Benchmark)> {
         benchmarks.push((
             "thread_futex",
             Benchmark::Parallel(Box::new(|| {
-                let mut bkg = counter::BackgroundThreads::<_, counter::FutexBarrier>::start(
+                let mut bkg = counter::BackgroundThreads::<_, counter::FutexScheduler>::start(
                     counter::narrow_u8_tuned,
                 );
                 Box::new(move |target| bkg.count(target)) as CounterBox

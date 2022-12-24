@@ -24,7 +24,7 @@ can implement a lighter-weight scheduling and synchronization protocol, and thus
 beat rayon's performance. However, rayon is pretty well implemented, so it
 actually takes a decent amount of work to outperform it.
 
-What building blocks do we need to count in parallel efficiently?
+So, what building blocks do we need to count in parallel efficiently?
 
 - N-1 worker threads where N is the desired amount of parallelism. The thread
   which requested the counting will do its share of the work.
@@ -43,32 +43,225 @@ What building blocks do we need to count in parallel efficiently?
 
 That's actually a fair amount of building blocks, and since we are trying to
 outperform rayon's tuned implementation, we also need to implement them using
-a synchronization protocol that is as lightweight as possible. Hence the end
-result is a fairly large amount of code:
+a synchronization protocol that is relatively clever. Hence the end result is
+a big chunk of code. Let's go through it step by step.
+
+
+## Read-Modify-Write operations and spinning
+
+Our synchronization protocol requires some atomic Read-Modify-Write (RMW)
+operations, where a thread must read a value from memory, compute a new
+dependent value, and store it in place of its former self, without other threads
+being able to intervene in the middle.
+
+While x86 CPUs provides native support for such operations on <=64-bit integer
+words, they are very expensive (hundreds of CPU cycles in the absence of
+contention, and that grows super-linearly when contention occurs), so we want as
+few of them per synchronization transaction as possible.
+
+To support blocking, well implemented operating system mutexes must perform at
+least two of these operations through a lock/unlock cycle:
+
+- One at locking time to check if the mutex is unlocked and if so lock it.
+    * If the mutex is locked, at least one more to tell the thread holding the
+      lock that we're waiting if the lock is still held at that time, or else
+      try to lock it again.
+- One at unlocking time to check if there are threads waiting for the unlock,
+  which allows avoiding the overhead of calling into the OS to unblock them in
+  the uncontended fast path.
+
+For the purpose of this simple program, any synchronization transaction should
+be doable in one blocking OS transaction, so we should never need more than two
+hardware RMW operations in succession on the uncontended path. If we do, it
+means that we're doing something inefficiently.
+
+We can get that down to one hardware RMW atomic operation in two different ways:
+
+- If we have only one integer to update, we can do so with a single hardware RMW
+  operation.
+- If we have non-integer or multiple variables to update and we expect updates
+  to take a very short amount of time (<1µs), then we can use a spin lock.
+
+This last bit warrants some explanations since [spin locks got a bit of a bad
+reputation recently](https://matklad.github.io//2020/01/02/spinlocks-considered-harmful.html),
+and for good reason: they are a rather specialized tool that tends to be overused.
+
+Well implemented mutexes differ from well-implemented spin locks in the
+following ways:
+
+1. They need more expensive hardware RMW operations during lock acquisition
+   to exchange more information with other threads. An RMW operation will always
+   be needed, but on some hardware, not all RMW operations are born equal.
+    * For example, `fetch_add` is less expensive than `compare_exchange` on x86
+      because the former is implemented using an infaillible instruction,
+      avoiding the need for costly retries in presence of thread contention.
+      But the more complexity you pile up into a single variable, the more
+      likely you are to need the full power of `compare_exchange` or the
+      higher-level `fetch_update` abstraction tht Rust builds on top of it.
+2. To detect other blocked threads, they need a hardware RMW operation at unlock
+   time, as mentioned earlier, whereas unlocking a spin lock only requires a
+   write because the in-memory data only has two states, locked and unlocked,
+   and only the thread holding the lock can perform the locked -> unlocked
+   state transition.
+3. If they fail to acquire the lock, they will start by busy-waiting in
+   userspace, but then eventually tell the OS scheduler that they are waiting
+   for something. The OS can use this information to schedule them out and
+   priorize running the thread holding the lock that they depend on. This is not
+   possible with spin locks, which are doomed to either burn CPU cycles or defer
+   to random other unscheduled threads for unbounded amounts of time.
+
+Spin locks are used to avoid costs #1 and #2 (expensive RMW operations) at the
+cost of losing benefit #3 (efficient blocking during long waits).
+
+The problem is that if long waits do happen, efficient blocking is actually very
+important, much more so than cheaping out on hardware RMW operations. Therefore,
+[spin locks are only efficient when long waits are exceptional, and their
+performance degrades horribly as contention goes
+up](https://matklad.github.io/2020/01/04/mutexes-are-faster-than-spinlocks.html).
+
+Thus, they require a very well-controlled execution environment where you can
+confidently assert that CPU cores are not oversubscribed for extended periods of
+time, and as a result are only relevant for specialized use cases, with no place
+in general-purpose applications. However, "specialized use case" is basically
+the leitmotiv of this book, so obviously I can and will provide the right
+environment guarantees for the sake of reaping those nice little spinlock perf
+profits.
+
+And thus, when I'll need to do batches of read-modify-write operations, I'll
+allow myself to lock them through the following spin waiting mechanism. Which,
+conveniently enough, is also generic enough to be usable as part of a blocking
+synchronization strategy.
 
 ```rust,no_run
-{{#include ../counter/src/lib.rs:thread_pool}}
+{{#include ../counter/src/lib.rs:spinlock}}
 ```
 
-What are the main performance optimizations applied here?
 
-- Like rayon, we skip threading-related overhead when running sequentially.
-- Atomic variables are used in combination with locks to enable both
-  blocking and non-blocking access to most of the shared state. Blocking access
-  is used to reduce the need for atomic read-modify-write operations, which are
-  expensive, as well as for lost wake-up prevention. Non-blocking access is used
-  to read out state or overwrite it without looking at the existing value.
-- OS-mediated waiting is only used when waiting for a job to come up, which
-  takes unbounded time. Other waits, which are expected to be very short, are
-  handled through spinlocks instead.
+## Scheduling
 
-How well does this work out?
+Given read-modify-write building blocks, we can start to work on the scheduling
+mechanism used by the main thread to submit work to worker threads and by all
+parties involved to tell each other when it's time to stop working, typically
+when the main thread exits or a worker thread panics.
+
+As a minor spoiler, I'll need to iterate on the implementation a bit later on,
+so let's be generic over components implementing this logic via the following
+trait...
+
+```rust,no_run
+{{#include ../counter/src/lib.rs:JobScheduler}}
+```
+
+...which is easy to implement using an atomic variable and a Barrier.
+
+```rust,no_run
+{{#include ../counter/src/lib.rs:BasicScheduler}}
+```
+
+Here, I am using a standard Barrier to have worker threads wait for job and
+stop signals. The main interesting thing that's happening is that I am
+forbidding zero-sized parallel jobs, as allowed by the `JobScheduler` API, to
+repurpose that forbidden job size as a signal that threads should stop.
+
+The astute reader will, however, notice that I am running afoul of my own
+"not more than two hardware RMW operations per transaction" rule in
+`BasicScheduler::start()`, as the implementation of `Barrier::wait()` must
+contain at least two such operations and I am using one more. This performance
+deficiency will be adressed in the next chapter.
+
+
+## Batching RMW operations
+
+As mentioned earlier, we will sometimes want to use spinlocks in order to
+piggyback a set of logically atomic RMW operations onto a single hardware atomic
+RMW operation. This is the abstraction that we are going to use to this end:
+
+```rust,no_run
+{{#include ../counter/src/lib.rs:LockedOps}}
+```
+
+The general idea is that it's okay to modify atomics using read-modify-write
+operations that are not atomic in hardware, as long as you ensure that only the
+active thread can write to the variables of interest while the operation is
+ongoing, and a (spin) lock is one way to achieve this.
+
+
+## Shared facilities
+
+Given ways to schedule jobs, signal errors, and batch RMW operations efficiently,
+we are ready to define the state shared between all processing threads, as well
+as its basic transactions.
+
+```rust,no_run
+{{#include ../counter/src/lib.rs:SharedState}}
+```
+
+This is a bit large, let's go through it step by step.
+
+Besides obvious things like the sequential counting implementation to be used
+by each thread, the number of worker threads, and the synchronization
+mechanisms introduced previously, the shared state contains two atomic
+variables:
+
+- `remaining_tasks` counts the number of threads that are working on a job. Each
+  thread that is done with its share of the job decrements it, and when it
+  reaches 0, it means the job is done.
+- `result` contains the job's result, which is the sum of all partial results
+  from processing threads.
+
+The main thread starts a job by initializing this state, then waking up workers
+through the `JobScheduler` mechanism. After that, it does its share of
+the work by calling `process()`, which we're going to describe later. Finally,
+it waits for any worker threads still processing the job, by spinning until
+`remaining_tasks` reaches zero, then fetches the aggregated result.
+
+Worker threads go through a simple look where they wait for
+`scheduler.wait_for_task()` to emit a job, then process it, then go back to
+waiting, until they are requested to stop. If a panic occurs, the panicking
+thread sends the stop signal so that other worker threads and the main threads
+eventually stop as well, avoiding livelock.
+
+The processing logic in `process()` starts by splitting the job into roughly
+identical chunks, counts sequentially, then makes sure worker threads wait for
+other workers to have started working (which is going to be needed later on),
+and finally updates both `result` and `remaining_task`.
+
+The write to `remaining_task` is ordered after the write to `result` via a
+`Release` barrier so that when the main thread later reads `remaining_task` with
+an `Acquire` barrier, it sees the `result` updates performed by all worker
+threads and therefore fetches the correct aggregated result.
+
+Finally, a little logger which is compiled out of release builds is provided,
+as this is empirically very useful when debugging incorrect logic in
+multi-threaded code.
+
+
+
+## Putting it all together
+
+At this point, we have all the logic we need. The only thing left to do is
+to determine how many CPUs are available, spawn an appropriate number of worker
+threads, provide the top-level counting API, and making sure that when the main
+thread exits, it warns worker threads so they exit too.
+
+```rust,no_run
+{{#include ../counter/src/lib.rs:BackgroundThreads}}
+```
+
+And with that, we have a full custom parallel counting implementation that we
+can compare to the Rayon one. How well does it perform?
 
 - 2 well-pinned threads beat sequential counting above 256 thousand iterations
   (16x better).
 - 4 well-pinned threads do so above 1 million iterations (8x better).
 - 8 threads do so above 2 million iterations (8x better).
 - 16 hyperthreads do so above 8 million iterations, (4x better).
+- The same asymptotic performance is reached at large amounts of iterations, as
+  one would expect since the synchronization overhead gets amortized more and
+  more and the actual counting work inbetween synchronization transactions isn't
+  very different.
 
 So, with this specialized implementation, we've cut down the small-task overhead
-by a sizable factor that goes up as the number of threads goes down.
+by a sizable factor that goes up as the number of threads goes down. But can we
+do better still by adressing my earlier comment that the naive `JobScheduler`
+above isn't very optimal?
