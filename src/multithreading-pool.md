@@ -47,7 +47,7 @@ a synchronization protocol that is as lightweight as possible. Hence the end
 result is a fairly large amount of code:
 
 ```rust,no_run
-{{#include ../counter/src/lib.rs:thread_custom}}
+{{#include ../counter/src/lib.rs:thread_pool}}
 ```
 
 What are the main performance optimizations applied here?

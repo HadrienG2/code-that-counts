@@ -12,7 +12,7 @@
 - [Multithreading (WIP)](./multithreading.md)
     * [Rayon](./multithreading-rayon.md)
     * [Custom thread pool](./multithreading-pool.md)
-    * [Custom synchronization (WIP)](./multithreading-sync.md)
+    * [Custom synchronization](./multithreading-sync.md)
     * [Streaming (WIP)](./multithreading-streaming.md)
     * [TODO]()
 
