@@ -1324,10 +1324,21 @@ impl JobScheduler for FutexScheduler {
         // Publish the target, that's not synchronization-critical
         self.request.store(target, Ordering::Relaxed);
 
-        // Publish one task per worker thread and wake workers up
-        debug_assert_eq!(self.task_futex.load(Ordering::Relaxed), Self::NO_TASK);
-        debug_assert!(num_threads <= Self::STOP_THRESHOLD);
-        self.task_futex.store(num_threads - 1, Ordering::Release);
+        // Publish one task per worker thread, making sure that worker threads
+        // have not stopped on the other side of the pipeline.
+        debug_assert!(num_threads < Self::STOP_THRESHOLD);
+        self.task_futex
+            .fetch_update(Ordering::Release, Ordering::Relaxed, |old| {
+                assert!(
+                    old < Self::STOP_THRESHOLD,
+                    "Can't schedule this new job, some workers have stopped"
+                );
+                debug_assert_eq!(old, Self::NO_TASK);
+                Some(num_threads - 1)
+            })
+            .unwrap();
+
+        // Wake up worker threads
         atomic_wait::wake_all(&self.task_futex);
     }
 
