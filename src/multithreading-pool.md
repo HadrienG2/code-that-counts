@@ -254,12 +254,11 @@ can compare to the Rayon one. How well does it perform?
 - 2 well-pinned threads beat sequential counting above 256 thousand iterations
   (16x better).
 - 4 well-pinned threads do so above 1 million iterations (8x better).
-- 8 threads do so above 2 million iterations (8x better).
+- 8 threads do so above 4 million iterations (4x better).
 - 16 hyperthreads do so above 8 million iterations, (4x better).
-- The same asymptotic performance is reached at large amounts of iterations, as
-  one would expect since the synchronization overhead gets amortized more and
-  more and the actual counting work inbetween synchronization transactions isn't
-  very different.
+- Asymptotic performance at large amounts of iterations is about 10% lower,
+  likely as a result of losing rayon's dynamic load balancing, which makes the
+  performance more sensitive to background tasks and scheduling jitter.
 
 So, with this specialized implementation, we've cut down the small-task overhead
 by a sizable factor that goes up as the number of threads goes down. But can we

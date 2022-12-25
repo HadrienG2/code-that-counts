@@ -34,19 +34,12 @@ popular desktop operating systems.
 {{#include ../counter/src/lib.rs:thread_sync}}
 ```
 
-This provides a performance improvement of up to 2x at smaller problem sizes
-(less than a few millions) and for smaller number of threads (2-4). At higher
-problem sizes and thread count, however, this code is actually slightly slower,
-asymptotically we lose a few microseconds per call.
+How does that change in synchronization strategy affect performance?
 
-This most likely happens because as the number of locally managed atomics grows,
-the design is getting less and less friendly to Zen 2's non-uniform L3 cache
-structure, and would benefit from some cache locality optimizations like teaming
-up threads by L3 cache blocks and having them work within "private" cache lines
-there until they're ready to share aggregated results with other teams.
-
-But before getting to this sort of optimizations, I think it might actually be
-worthwhile to discuss the elephant in the room, which is that if the performance
-profile is now close to 100% syscalls and we've worked extra hard to make sure
-we call the right syscalls at the right time, then the only way forward is to
-figure out another design where we rely on even less syscalls.
+- 2 well-pinned threads beat sequential counting above 64 thousand iterations
+  (4x better).
+- 4 well-pinned threads do so above 128 thousand iterations (8x better).
+- 8 threads do so above 512 thousand iterations (8x better).
+- 16 hyperthreads do so above 2 million iterations, (4x better).
+- Asymptotic performance at large amounts of iterations is comparable, as one
+  would expect since synchronization overhead is amortized in this configuration.

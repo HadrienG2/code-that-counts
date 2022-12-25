@@ -800,15 +800,20 @@ fn spin_loop<const INFINITE: bool, Ready>(
     mut expensive_check: impl FnMut() -> Option<Ready>,
 ) -> Option<Ready> {
     // Tuning parameters, empirically optimal on my machine
-    const SPIN_ITERS: usize = 6;
-    const BOUNDED_YIELD_ITERS: usize = 10;
+    use std::time::{Duration, Instant};
+    const SPIN_ITERS: usize = 200;
+    const MAX_BACKOFF: usize = 1 << 2;
+    const OS_SPIN_DELAY: Duration = Duration::from_nanos(1);
+    const OS_SPIN_BOUND: Duration = Duration::from_micros(20);
 
-    // Start with a userspace busy loop with exponential backoff
-    for backoff in 0..SPIN_ITERS {
+    // Start with a userspace busy loop with a bit of exponential backoff
+    let mut backoff = 1;
+    for _ in 0..SPIN_ITERS {
         if let Some(ready) = cheap_check() {
             return Some(ready);
         }
-        for _ in 0..1 << backoff {
+        backoff = (2 * backoff).min(MAX_BACKOFF);
+        for _ in 0..backoff {
             std::hint::spin_loop();
         }
     }
@@ -817,10 +822,14 @@ fn spin_loop<const INFINITE: bool, Ready>(
     // reduce our CPU consumption at the cost of higher wakeup latency
     macro_rules! yield_iter {
         () => {
+            // Check if the condition is now met
             if let Some(ready) = expensive_check() {
                 return Some(ready);
             }
-            std::thread::yield_now();
+
+            // yield_now() would be semantically more correct for this situation
+            // but is broken on Linux as the CFS scheduler just reschedules us
+            std::thread::sleep(OS_SPIN_DELAY);
         };
     }
     //
@@ -829,10 +838,11 @@ fn spin_loop<const INFINITE: bool, Ready>(
             yield_iter!();
         }
     } else {
-        for _ in 0..BOUNDED_YIELD_ITERS {
+        let start = Instant::now();
+        while start.elapsed() < OS_SPIN_BOUND {
             yield_iter!();
         }
-        None
+        expensive_check()
     }
 }
 // ANCHOR_END: spinlock
@@ -1311,11 +1321,11 @@ impl JobScheduler for FutexScheduler {
     fn start(&self, target: u64, num_threads: u32) {
         use atomic::Ordering;
 
-        // Set state that is not critical to synchronization
+        // Publish the target, that's not synchronization-critical
         self.request.store(target, Ordering::Relaxed);
 
         // Publish one task per worker thread and wake workers up
-        debug_assert_eq!(self.task_futex.load(Ordering::Relaxed), 0);
+        debug_assert_eq!(self.task_futex.load(Ordering::Relaxed), Self::NO_TASK);
         debug_assert!(num_threads <= Self::STOP_THRESHOLD);
         self.task_futex.store(num_threads - 1, Ordering::Release);
         atomic_wait::wake_all(&self.task_futex);
@@ -1335,7 +1345,7 @@ impl JobScheduler for FutexScheduler {
         loop {
             // Wait for a request to come in
             if self.faillible_spin::<false>(|| !self.no_task()).is_none() {
-                atomic_wait::wait(&self.task_futex, 0);
+                atomic_wait::wait(&self.task_futex, Self::NO_TASK);
                 if self.no_task() {
                     continue;
                 }
@@ -1343,7 +1353,7 @@ impl JobScheduler for FutexScheduler {
 
             // Acknowledge the request, check for concurrent stop signals
             let prev_started = self.task_futex.fetch_sub(1, Ordering::Acquire);
-            debug_assert!(prev_started > 0);
+            debug_assert!(prev_started > Self::NO_TASK);
             if prev_started < Self::STOP_THRESHOLD {
                 return Ok(self.request.load(Ordering::Relaxed));
             } else {
@@ -1360,12 +1370,16 @@ impl JobScheduler for FutexScheduler {
 }
 //
 impl FutexScheduler {
-    /// Values of `num_tasks` higher than this means all threads should stop
+    /// This value of `task_futex` means there is no work to be done and worker
+    /// threads should spin then sleep waiting for tasks to come up
+    const NO_TASK: u32 = 0;
+
+    /// Values of `task_futex` higher than this means all threads should stop
     const STOP_THRESHOLD: u32 = u32::MAX / 2;
 
     /// Truth that all scheduled tasks have been started
     fn no_task(&self) -> bool {
-        self.task_futex.load(atomic::Ordering::Relaxed) == 0
+        self.task_futex.load(atomic::Ordering::Relaxed) == Self::NO_TASK
     }
 }
 // ANCHOR_END: thread_sync
