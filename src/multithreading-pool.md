@@ -121,9 +121,9 @@ up](https://matklad.github.io/2020/01/04/mutexes-are-faster-than-spinlocks.html)
 
 Thus, they require a very well-controlled execution environment where you can
 confidently assert that CPU cores are not oversubscribed for extended periods of
-time, and as a result are only relevant for specialized use cases, with no place
-in general-purpose applications. However, "specialized use case" is basically
-the leitmotiv of this book, so obviously I can and will provide the right
+time. As a result, they are only relevant for specialized use cases, not
+general-purpose applications. However, "specialized use case" is basically the
+leitmotiv of this book, so obviously I can and will provide the right
 environment guarantees for the sake of reaping those nice little spinlock perf
 profits.
 
@@ -165,9 +165,9 @@ repurpose that forbidden job size as a signal that threads should stop.
 
 The astute reader will, however, notice that I am running afoul of my own
 "not more than two hardware RMW operations per transaction" rule in
-`BasicScheduler::start()`, as the implementation of `Barrier::wait()` must
-contain at least two such operations and I am using one more. This performance
-deficiency will be adressed in the next chapter.
+`BasicScheduler::start()`, as the blocking implementation of `Barrier::wait()`
+must use at least two such operations and I am using one more for error handling.
+This performance deficiency will be adressed in the next chapter.
 
 
 ## Batching RMW operations

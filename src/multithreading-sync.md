@@ -3,7 +3,7 @@
 Running the custom threaded version with a small job through a profiler tells me
 that it spends a sizable fraction of its time in the Linux kernel's `futex()`
 synchronization primitive, called by rustc's internal condition variable
-implementation, itself triggered by our "wait for new task" barrier.
+implementation, itself triggered by our "wait for new task" Barrier.
 
 As far as I know, `futex()` is indeed the fastest primitive provided by Linux
 for programs to await events. However, a condition variable may not be the most
@@ -25,8 +25,8 @@ foot with lost wake-ups in naive usage. But it is unfortunate that it does so
 at the cost of making this synchronization primitive a poor pick in code where
 performance matters.
 
-So if want to go faster, we'll need to cut the middleman go lower-level, down to
-`futex()` and its cousins on other platforms. Fortunately, the `atomic_wait`
+So if want to go faster, we'll need to skip the middleman and go lower-level,
+down to `futex()` and its cousins on other OSes. Fortunately, the `atomic_wait`
 crate provides a least common denominator platform abstraction layer across all
 popular desktop operating systems.
 
