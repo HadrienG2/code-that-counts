@@ -170,27 +170,30 @@ must use at least two such operations and I am using one more for error handling
 This performance deficiency will be adressed in the next chapter.
 
 
-## Batching RMW operations
+## Collecting results
 
-As mentioned earlier, we will sometimes want to use spinlocks in order to
-piggyback a set of logically atomic RMW operations onto a single hardware atomic
-RMW operation. This is the abstraction that we are going to use to this end:
+After starting jobs, we need to wait for them to finish and collect results.
+This is where a spinlock will come into play, since we cannot reasonably fit
+both our aggregated 64-bit result and a counter of unfinished threads into a
+single machine word, and so cannot update both with a single hardware atomic
+read-modify-write operations. Thus we need locking to provide logical atomicity.
 
 ```rust,no_run
-{{#include ../counter/src/lib.rs:LockedOps}}
+{{#include ../counter/src/lib.rs:Aggregator}}
 ```
 
-The general idea is that it's okay to modify atomics using read-modify-write
-operations that are not atomic in hardware, as long as you ensure that only the
-active thread can write to the variables of interest while the operation is
-ongoing, and a (spin) lock is one way to achieve this.
+The only interesting things within this code are the atomic memory orderings,
+which are chosen in such as way that any thread which either acquires the
+spinlock or spins waiting for `remaining_tasks` to reach 0 with `Acquire`
+ordering will get a consistent value of `result` at the time where
+`remaining_task` was last decremented.
 
 
 ## Shared facilities
 
-Given ways to schedule jobs, signal errors, and batch RMW operations efficiently,
-we are ready to define the state shared between all processing threads, as well
-as its basic transactions.
+Now that we have ways to schedule jobs and collect results, we are ready to
+define the state shared between all processing threads, as well as its basic
+transactions.
 
 ```rust,no_run
 {{#include ../counter/src/lib.rs:SharedState}}
@@ -198,38 +201,28 @@ as its basic transactions.
 
 This is a bit large, let's go through it step by step.
 
-Besides obvious things like the sequential counting implementation to be used
-by each thread, the number of worker threads, and the synchronization
-mechanisms introduced previously, the shared state contains two atomic
-variables:
+The shared state is a combination of the two synchronization primitives that we
+have introduced previously with a sequential counting implementation and
+a counter of processing threads.
 
-- `remaining_tasks` counts the number of threads that are working on a job. Each
-  thread that is done with its share of the job decrements it, and when it
-  reaches 0, it means the job is done.
-- `result` contains the job's result, which is the sum of all partial results
-  from processing threads.
+The main thread starts a job by resetting the `Accumulator`, then waking up
+workers through the `JobScheduler` mechanism. After that, it does its share of
+the work by calling `process()`, which we're going to describe later. Finally
+it either gets the final result directly by virtue of finishing last or waits
+for worker threads to provide it.
 
-The main thread starts a job by initializing this state, then waking up workers
-through the `JobScheduler` mechanism. After that, it does its share of
-the work by calling `process()`, which we're going to describe later. Finally,
-it waits for any worker threads still processing the job, by spinning until
-`remaining_tasks` reaches zero, then fetches the aggregated result.
-
-Worker threads go through a simple look where they wait for
+Worker threads go through a simple loop where they wait for
 `scheduler.wait_for_task()` to emit a job, then process it, then go back to
 waiting, until they are requested to stop. If a panic occurs, the panicking
 thread sends the stop signal so that other worker threads and the main threads
-eventually stop as well, avoiding livelock.
+eventually stop as well, avoiding a deadlock scenario where surviving worker
+threads would wait for a new job from the main thread, which itself waits for
+worker threads to finish the current job.
 
 The processing logic in `process()` starts by splitting the job into roughly
 identical chunks, counts sequentially, then makes sure worker threads wait for
 other workers to have started working (which is going to be needed later on),
-and finally updates both `result` and `remaining_task`.
-
-The write to `remaining_task` is ordered after the write to `result` via a
-`Release` barrier so that when the main thread later reads `remaining_task` with
-an `Acquire` barrier, it sees the `result` updates performed by all worker
-threads and therefore fetches the correct aggregated result.
+and finally merges the result contribution using the `Accumulator`.
 
 Finally, a little logger which is compiled out of release builds is provided,
 as this is empirically very useful when debugging incorrect logic in
@@ -254,11 +247,9 @@ can compare to the Rayon one. How well does it perform?
 - 2 well-pinned threads beat sequential counting above 256 thousand iterations
   (16x better).
 - 4 well-pinned threads do so above 1 million iterations (8x better).
-- 8 threads do so above 4 million iterations (4x better).
+- 8 threads do so above 2 million iterations (8x better).
 - 16 hyperthreads do so above 8 million iterations, (4x better).
-- Asymptotic performance at large amounts of iterations is about 10% lower,
-  likely as a result of losing rayon's dynamic load balancing, which makes the
-  performance more sensitive to background tasks and scheduling jitter.
+- Asymptotic performance at large amounts of iterations is comparable.
 
 So, with this specialized implementation, we've cut down the small-task overhead
 by a sizable factor that goes up as the number of threads goes down. But can we

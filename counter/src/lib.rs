@@ -801,7 +801,7 @@ fn spin_loop<const INFINITE: bool, Ready>(
 ) -> Option<Ready> {
     // Tuning parameters, empirically optimal on my machine
     use std::time::{Duration, Instant};
-    const SPIN_ITERS: usize = 200;
+    const SPIN_ITERS: usize = 300;
     const MAX_BACKOFF: usize = 1 << 2;
     const OS_SPIN_DELAY: Duration = Duration::from_nanos(1);
     const OS_SPIN_BOUND: Duration = Duration::from_micros(20);
@@ -812,10 +812,10 @@ fn spin_loop<const INFINITE: bool, Ready>(
         if let Some(ready) = cheap_check() {
             return Some(ready);
         }
-        backoff = (2 * backoff).min(MAX_BACKOFF);
         for _ in 0..backoff {
             std::hint::spin_loop();
         }
+        backoff = (2 * backoff).min(MAX_BACKOFF);
     }
 
     // Switch to yielding to the OS once it's clear it's gonna take a while to
@@ -848,7 +848,7 @@ fn spin_loop<const INFINITE: bool, Ready>(
 // ANCHOR_END: spinlock
 
 // ANCHOR: JobScheduler
-/// Mechanism for the main thread to send work to worker threads
+/// Mechanism to synchronize job startup and error handling
 pub trait JobScheduler {
     /// Set up synchronization
     fn new(num_threads: u32) -> Self;
@@ -977,59 +977,120 @@ impl JobScheduler for BasicScheduler {
 }
 // ANCHOR_END: BasicScheduler
 
-// ANCHOR: LockedOps
-// Spinlock-protected batches of atomic read-modify-write operations
-type SpinLock = atomic::Atomic<bool>;
-//
-struct LockedOps<'lock>(&'lock SpinLock);
-//
-impl<'lock> LockedOps<'lock> {
-    /// Acquire spin lock
-    pub fn lock(lock: &'lock SpinLock) -> Self {
-        use atomic::Ordering;
+// ANCHOR: Aggregator
+/// Mechanism to collect processing thread results and detect termination
+struct Aggregator {
+    /// Spin lock used to synchronize concurrent read-modify-write operations
+    ///
+    /// Initially `false`, set to `true` while the lock is held.
+    ///
+    spin_lock: atomic::Atomic<bool>,
 
-        // Try to opportunistically acquire the uncontended lock
-        macro_rules! try_lock {
-            () => {
-                if lock.swap(true, Ordering::Acquire) == false {
-                    return Self(lock);
-                }
-            };
+    /// Number of processing threads that have work to do
+    ///
+    /// This is set to `num_threads` when a job is submitted. Each time
+    /// a thread is done with its task, it decrements this counter. So when it
+    /// reaches 0, it tells the thread that last decremented it that all
+    /// worker threads are done, with Acquire/Release synchronization.
+    ///
+    remaining_tasks: atomic::Atomic<u32>,
+
+    /// Sum of partial computation results
+    result: atomic::Atomic<u64>,
+}
+//
+impl Aggregator {
+    /// Create a new aggregator
+    pub fn new() -> Self {
+        use atomic::Atomic;
+        Self {
+            spin_lock: Atomic::new(false),
+            remaining_tasks: Atomic::new(0),
+            result: Atomic::default(),
         }
-        try_lock!();
+    }
 
-        // Otherwise, wait for the lock to become available and retry
+    /// Prepare the aggregator for a new job
+    ///
+    /// This should be done before starting a new job, and after any previously
+    /// scheduled job have finished running.
+    ///
+    pub fn reset(&self, num_threads: u32) {
+        use atomic::Ordering;
+        debug_assert!(!self.spin_lock.load(Ordering::Relaxed));
+        debug_assert_eq!(self.remaining_tasks.load(Ordering::Relaxed), 0);
+        self.remaining_tasks.store(num_threads, Ordering::Relaxed);
+        self.result.store(0, Ordering::Relaxed);
+    }
+
+    /// Aggregate a thread's partial results, tell the job's result if finished
+    pub fn task_done(&self, result: u64) -> Option<u64> {
+        use atomic::Ordering;
+        let mut lock = self.lock();
+        let merged_result = lock.merge_result(result, Ordering::Relaxed);
+        lock.notify_done(Ordering::Release).then(|| {
+            atomic::fence(Ordering::Acquire);
+            merged_result
+        })
+    }
+
+    /// Wait for the job to be done or error out, collect the result
+    pub fn wait_for_result(&self, scheduler: &impl JobScheduler) -> Result<u64, Stopped> {
+        use atomic::Ordering;
+        scheduler.faillible_spin_wait(|| self.remaining_tasks.load(Ordering::Relaxed) == 0)?;
+        atomic::fence(Ordering::Acquire);
+        Ok(self.result.load(Ordering::Relaxed))
+    }
+
+    /// Acquire spin lock
+    fn lock(&self) -> AggregatorGuard {
+        use atomic::Ordering;
         loop {
+            // Try to opportunistically acquire the lock
+            if self.spin_lock.swap(true, Ordering::Acquire) == false {
+                return AggregatorGuard(self);
+            }
+
+            // Otherwise, wait for it to become available before retrying
             let check = || {
-                if lock.load(Ordering::Relaxed) {
+                if self.spin_lock.load(Ordering::Relaxed) {
                     None
                 } else {
                     Some(())
                 }
             };
             spin_loop::<true, ()>(check, check);
-            try_lock!();
         }
     }
+}
 
-    /// Specialization of fetch_update for counter decrement that goes to zero
-    pub fn fetch_dec(&mut self, target: &atomic::Atomic<u32>, order: atomic::Ordering) -> bool {
-        self.fetch_update(target, order, |old| old > 0, |old| old - 1) == 1
+/// Equivalent of `MutexGuard` for the Aggregator spin lock
+struct AggregatorGuard<'aggregator>(&'aggregator Aggregator);
+//
+impl<'aggregator> AggregatorGuard<'aggregator> {
+    /// Merge partial result `result`
+    pub fn merge_result(&mut self, result: u64, order: atomic::Ordering) -> u64 {
+        self.fetch_update(
+            &self.0.result,
+            order,
+            |old| old <= u64::MAX - result,
+            |old| old + result,
+        )
     }
 
-    /// Specialization of fetch_update for result aggregation
-    pub fn fetch_add(&mut self, target: &atomic::Atomic<u64>, value: u64, order: atomic::Ordering) {
-        self.fetch_update(
-            target,
-            order,
-            |old| old <= u64::MAX - value,
-            |old| old + value,
-        );
+    /// Notify that this thread is done, tell if the job is done
+    pub fn notify_done(&mut self, order: atomic::Ordering) -> bool {
+        self.fetch_update(&self.0.remaining_tasks, order, |old| old > 0, |old| old - 1) == 0
     }
 
     /// Read-Modify_Write operation that is not atomic in hardware, but
     /// logically atomic if all concurrent writes to the target atomic variable
-    /// require exclusive access to the spinlock-protected LockedOps
+    /// require exclusive access to the spinlock-protected AggrecatorGuard
+    ///
+    /// In debug builds, the `check` sanity check is first performed on the
+    /// existing value, then a new value is computed through `change`, inserted
+    /// into the target atomic variable, and returned.
+    ///
     fn fetch_update<T: Copy>(
         &mut self,
         target: &atomic::Atomic<T>,
@@ -1041,8 +1102,9 @@ impl<'lock> LockedOps<'lock> {
         let [load_order, store_order] = Self::rmw_order(order);
         let old = target.load(load_order);
         debug_assert!(check(old));
-        target.store(change(old), store_order);
-        old
+        let new = change(old);
+        target.store(new, store_order);
+        new
     }
 
     /// Load and store ordering of non-atomic read-modify-write operations
@@ -1058,12 +1120,12 @@ impl<'lock> LockedOps<'lock> {
     }
 }
 //
-impl<'lock> Drop for LockedOps<'lock> {
+impl<'aggregator> Drop for AggregatorGuard<'aggregator> {
     fn drop(&mut self) {
-        self.0.store(false, atomic::Ordering::Release);
+        self.0.spin_lock.store(false, atomic::Ordering::Release);
     }
 }
-// ANCHOR_END: LockedOps
+// ANCHOR_END: Aggregator
 
 // ANCHOR: SharedState
 /// State shared between the main thread and worker threads
@@ -1074,27 +1136,11 @@ struct SharedState<Counter: Fn(u64) -> u64 + Sync, Scheduler> {
     /// Number of processing threads, including main thread
     num_threads: u32,
 
-    /// Mechanism to synchronize at the start and end of jobs
+    /// Mechanism to synchronize job startup and error handling
     scheduler: Scheduler,
 
-    /// Number of processing threads that have work to do
-    ///
-    /// This is set to `num_threads` when a job is submitted. Each time
-    /// a thread is done with its task, it decrements this counter. So when it
-    /// reaches 0, it tells the thread that last decremented it that all
-    /// worker threads are done, with Acquire/Release synchronization.
-    ///
-    remaining_tasks: atomic::Atomic<u32>,
-
-    /// Computation result, synchronized using `locked`
-    result: atomic::Atomic<u64>,
-
-    /// State protection spinlock
-    ///
-    /// This spinlock is not used to protect access to fully unsynchronized state,
-    /// but rather to optimize batches of atomic read-modify-write operations.
-    ///
-    spinlock: SpinLock,
+    /// Mechanism to synchronize task and job completion
+    aggregator: Aggregator,
 }
 //
 impl<Counter: Fn(u64) -> u64 + std::panic::RefUnwindSafe + Sync, Scheduler: JobScheduler>
@@ -1102,21 +1148,16 @@ impl<Counter: Fn(u64) -> u64 + std::panic::RefUnwindSafe + Sync, Scheduler: JobS
 {
     /// Set up shared state
     pub fn new(counter: Counter, num_threads: u32) -> Self {
-        use atomic::Atomic;
         Self {
             counter,
             num_threads,
             scheduler: Scheduler::new(num_threads),
-            remaining_tasks: Atomic::new(0),
-            result: Atomic::default(),
-            spinlock: SpinLock::default(),
+            aggregator: Aggregator::new(),
         }
     }
 
     /// Schedule counting work and wait for the end result
     pub fn count(&self, target: u64) -> u64 {
-        use atomic::Ordering;
-
         // Handle sequential special cases
         if self.num_threads == 1 || target < Scheduler::MIN_TARGET {
             return (self.counter)(target);
@@ -1125,24 +1166,21 @@ impl<Counter: Fn(u64) -> u64 + std::panic::RefUnwindSafe + Sync, Scheduler: JobS
         // Schedule job
         let debug_log = |action| debug_log(true, action);
         debug_log("scheduling a new job");
-        debug_assert_eq!(self.remaining_tasks.load(Ordering::Relaxed), 0);
-        self.remaining_tasks
-            .store(self.num_threads, Ordering::Relaxed);
-        self.result.store(0, Ordering::Relaxed);
+        self.aggregator.reset(self.num_threads);
         self.scheduler.start(target, self.num_threads);
 
-        // Do our share of the work and wait for results
-        if !self.process(target, Self::MAIN_THREAD as u64) {
-            debug_log("waiting for the job's results");
-            self.scheduler
-                .faillible_spin_wait(|| self.remaining_tasks.load(atomic::Ordering::Relaxed) == 0)
-                .expect("This job won't end because some workers have stopped");
-            atomic::fence(atomic::Ordering::Acquire);
-        }
-
-        // Fetch result, piggybacking on wait_for_end's Acquire barrier
-        debug_log("fetching the job's result");
-        self.result.load(Ordering::Relaxed)
+        // Do our share of the work
+        let result = self
+            .process(target, Self::MAIN_THREAD as u64)
+            .unwrap_or_else(|| {
+                // If we're not finishing last, wait for workers to finish
+                debug_log("waiting for the job's result");
+                self.aggregator
+                    .wait_for_result(&self.scheduler)
+                    .expect("This job won't end because some workers have stopped")
+            });
+        debug_log("done");
+        result
     }
 
     /// Thread index of the main thread
@@ -1177,7 +1215,7 @@ impl<Counter: Fn(u64) -> u64 + std::panic::RefUnwindSafe + Sync, Scheduler: JobS
     }
 
     /// Process this thread's share of a job, tell if the job is done
-    fn process(&self, target: u64, thread_idx: u64) -> bool {
+    fn process(&self, target: u64, thread_idx: u64) -> Option<u64> {
         // Determine which share of the counting work we'll take
         let num_threads = self.num_threads as u64;
         let base_share = target / num_threads;
@@ -1199,12 +1237,7 @@ impl<Counter: Fn(u64) -> u64 + std::panic::RefUnwindSafe + Sync, Scheduler: JobS
 
         // Merge our partial result into the global result
         debug_log("merging its result contribution");
-        let mut lock = LockedOps::lock(&self.spinlock);
-        lock.fetch_add(&self.result, result, atomic::Ordering::Relaxed);
-
-        // Notify that we are done, check if the overall job is done
-        debug_log("done with its task");
-        lock.fetch_dec(&self.remaining_tasks, atomic::Ordering::Release)
+        self.aggregator.task_done(result)
     }
 }
 

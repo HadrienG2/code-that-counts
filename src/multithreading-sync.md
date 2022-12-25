@@ -36,10 +36,9 @@ popular desktop operating systems.
 
 How does that change in synchronization strategy affect performance?
 
-- 2 well-pinned threads beat sequential counting above 64 thousand iterations
-  (4x better).
+- 2 well-pinned threads beat sequential counting above 128 thousand iterations
+  (2x better).
 - 4 well-pinned threads do so above 128 thousand iterations (8x better).
-- 8 threads do so above 512 thousand iterations (8x better).
-- 16 hyperthreads do so above 2 million iterations, (4x better).
-- Asymptotic performance at large amounts of iterations is comparable, as one
-  would expect since synchronization overhead is amortized in this configuration.
+- 8 threads do so above 512 thousand iterations (4x better).
+- 16 hyperthreads do so above 1 million iterations, (8x better).
+- Asymptotic performance at large amounts of iterations is comparable.
