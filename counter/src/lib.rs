@@ -1028,10 +1028,7 @@ impl Aggregator {
         use atomic::Ordering;
         let mut lock = self.lock();
         let merged_result = lock.merge_result(result, Ordering::Relaxed);
-        lock.notify_done(Ordering::Release).then(|| {
-            atomic::fence(Ordering::Acquire);
-            merged_result
-        })
+        lock.notify_done(Ordering::Release).then_some(merged_result)
     }
 
     /// Wait for the job to be done or error out, collect the result
