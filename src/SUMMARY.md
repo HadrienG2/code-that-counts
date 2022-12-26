@@ -15,5 +15,8 @@
     * [Custom synchronization](./multithreading-sync.md)
     * [Scaling up (WIP)](./multithreading-scaling.md)
     * [Streaming (WIP)](./multithreading-streaming.md)
+- [GPU (WIP)](./gpu.md)
+    * [Multi-GPU (WIP)]()
+    * [Hybrid (WIP)]()
 
 [Conclusion (WIP)](./conclusion.md)
