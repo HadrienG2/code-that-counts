@@ -35,3 +35,23 @@ when using all CPU cores, with throughput per CPU clock cycle increasing by
 Now, three thousand billion counter increments per cycle is as far as I'm going
 to get on my CPU when it comes to asymptotic throughput. But this solution can
 be improved in other respects.
+
+Before getting there, though, I would like to address one more matter. Given
+that my CPU has hyperthreading functionality, it actually exposes 16 hardware
+threads, not 8, so you might expect a 16x speedup. But the truth is, for a
+well-tuned compute-bound task, that cannot happen.
+
+The reason is that hyperthreading works by multiplexing two instruction streams
+over the execution resources of one CPU core. As a result, hyperthreading only
+provides performance benefits for code that fails to saturate a CPU core's
+execution resources on its own, like our initial versions without ILP. Now that
+our code is tuned to do avoid this pitfall, the impact of hyperthreading on
+performance can only be at best neutral, and at worst negative.
+
+To put in an other way, if you encounter code that performs better with
+hyperthreading than without, chances are high that the code is not putting the
+CPU to good use to begin with and could benefit from some single-threaded
+optimization. The main exception would be latency-sensitive code that spends
+its time waiting for external events but must react to them very quickly as soon
+as they occur, such as low-latency servers or hardware interrupt handlers in
+operating systems.

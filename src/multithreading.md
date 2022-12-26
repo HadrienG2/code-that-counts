@@ -14,9 +14,3 @@ On the surface, that sounds easy enough:
 But this version doesn't perform super impressively, only achieving a 4.8x
 speed-up on 8 CPU cores even when counting to a very high 69 billion limit.
 Surely we can do better than that.
-
-TODO: Start with mutex and contended atomic, then go all the way to a parallel
-      binary reduction tree for the final merging, with join-and-sum as an
-      intermediary easy hack. May also benefit from sub-parts. Do not miss cheap
-      shot on hyperthreading, but only after making sure we can't use it to
-      put those integer ALUs to good use :)
