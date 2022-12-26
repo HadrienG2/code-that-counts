@@ -545,6 +545,6 @@ mod tests {
     #[quickcheck]
     fn thread_pool(target: u32) -> TestResult {
         let mut lock = BKG_THREADS_BASIC.lock().unwrap();
-        test_utils::test_counter(target, |target| lock.count(target))
+        test_utils::test_counter_impl(target, |target| lock.count(target))
     }
 }
