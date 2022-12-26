@@ -12,7 +12,7 @@ pub struct FutexScheduler {
     ///
     /// To request threads to stop, this is set to `u32::MAX`. In general,
     /// anything above `Self::STOP_THRESHOLD` indicates that threads should
-    /// stop, this flexibility allows making cancelation free on the fast path.
+    /// stop, having this flexibility makes cancelation cheaper to implement.
     ///
     /// Provides Acquire/Release synchronization with publisher of info read.
     ///
