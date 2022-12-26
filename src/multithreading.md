@@ -8,7 +8,7 @@ performance.
 On the surface, that sounds easy enough:
 
 ```rust,no_run
-{{#include ../counter/src/lib.rs:thread_basic}}
+{{#include ../counter/src/thread/basic.rs:thread_basic}}
 ```
 
 But this version doesn't perform super impressively, only achieving a 4.8x

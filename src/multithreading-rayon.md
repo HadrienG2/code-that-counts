@@ -24,7 +24,7 @@ mechanism, to get code that is simpler and performs better at little development
 cost :
 
 ```rust,no_run
-{{#include ../counter/src/lib.rs:thread_rayon}}
+{{#include ../counter/src/thread/rayon.rs:thread_rayon}}
 ```
 
 And with that, we get a 7.6x speedup on 8 CPU cores when counting up to 2^36.
@@ -36,7 +36,7 @@ Now, three thousand billion counter increments per cycle is as far as I'm going
 to get on my CPU when it comes to asymptotic throughput. But this solution can
 be improved in other respects.
 
-Before getting there, though, I would like to address one more matter. Given
+Before getting there, though, I would like to address another matter. Given
 that my CPU has hyperthreading functionality, it actually exposes 16 hardware
 threads, not 8, so you might expect a 16x speedup. But the truth is, for a
 well-tuned compute-bound task, that cannot happen.

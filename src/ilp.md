@@ -19,7 +19,7 @@ need to maintain multiple independent counters and spread the counting work
 across them like this:
 
 ```rust,no_run
-{{#include ../counter/src/lib.rs:ilp}}
+{{#include ../counter/src/ilp.rs:ilp}}
 ```
 
 Notice that we need extra code in the end to merge counters and manage those

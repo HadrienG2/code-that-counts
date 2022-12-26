@@ -55,7 +55,7 @@ performance on Zen 2 and other modern x86 CPUs. But hopefully you can easily see
 how the general approach would extend to SSE and non-x86 vector instruction sets.
 
 ```rust,no_run
-{{#include ../counter/src/lib.rs:narrow_SimdAccumulator}}
+{{#include ../counter/src/simd/narrow.rs:narrow_SimdAccumulator}}
 ```
 
 
@@ -72,7 +72,7 @@ integers, then integrate these results into a set of global u64 accumulators,
 every time a narrow integer overflow would happen:
 
 ```rust,no_run
-{{#include ../counter/src/lib.rs:generic_ilp_simple}}
+{{#include ../counter/src/simd/narrow.rs:generic_narrow_simple}}
 ```
 
 ...and if we test this implementation, we see that each halving of the counter
@@ -101,14 +101,14 @@ spill into scalar 64-bit integers as they did before.
 One can offload this cascading accumulation concern to a dedicated struct...
 
 ```rust,no_run
-{{#include ../counter/src/lib.rs:U8Accumulator}}
+{{#include ../counter/src/simd/narrow.rs:U8Accumulator}}
 ```
 
 ...and then build a top-level counting function that is expressed in terms of
 using this accumulator:
 
 ```rust,no_run
-{{#include ../counter/src/lib.rs:narrow_u8}}
+{{#include ../counter/src/simd/narrow.rs:narrow_u8}}
 ```
 
 And with that, I get a 1.9x speedup with respect to the version that uses
@@ -145,7 +145,7 @@ countings to our previous SIMD + ILP version, which has a very low entry cost
 and much better performance than counting with scalar 64-bit integers already!
 
 ```rust,no_run
-{{#include ../counter/src/lib.rs:narrow_u8_tuned}}
+{{#include ../counter/src/simd/narrow.rs:narrow_u8_tuned}}
 ```
 
 And with that, we get much more satisfactory performance at low iteration counts:

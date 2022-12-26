@@ -29,7 +29,7 @@ the only way supported by the `safe_arch` crate that we've used so far, so
 that's the way we are going to use. Simple usage looks like this:
 
 ```rust,no_run
-{{#include ../counter/src/lib.rs:multiversion_sse2}}
+{{#include ../counter/src/simd/multiversion.rs:multiversion_sse2}}
 ```
 
 ...and by sprinkling `#[cfg(target_feature = "sse2")]` in all the places where
@@ -60,7 +60,7 @@ reduction tree in the `SimdAccumulator::reduce()` implementation, which is just
 the x86 SIMD equivalent of what we've been doing with ILP for a while now.
 
 ```rust,no_run
-{{#include ../counter/src/lib.rs:avx2}}
+{{#include ../counter/src/simd/multiversion.rs:avx2}}
 ```
 
 But to actually benefit from this, users need to compile the code with the

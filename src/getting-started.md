@@ -3,7 +3,7 @@
 Let's start simple and count with the `+` operator:
 
 ```rust,no_run
-{{#include ../counter/src/lib.rs:basic}}
+{{#include ../counter/src/basic.rs:basic}}
 ```
 
 Here, I use my [`pessimize` crate](https://github.com/HadrienG2/pessimize),

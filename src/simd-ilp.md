@@ -7,7 +7,7 @@ achieve extra execution performance. Now it's time to combine them and see how
 the benefits add up.
 
 ```rust,no_run
-{{#include ../counter/src/lib.rs:simd_ilp}}
+{{#include ../counter/src/simd/ilp.rs:simd_ilp}}
 ```
 
 This code... could be prettier. It certainly shows the need for layers of
@@ -64,7 +64,7 @@ that can be taken care of.
 And so I did actually try out this hybrid scalar + SIMD approach...
 
 ```rust,no_run
-{{#include ../counter/src/lib.rs:extreme_ilp}}
+{{#include ../counter/src/simd/ilp.rs:extreme_ilp}}
 ```
 
 ...but I observed no performance benefits with respect to the SIMD+ILP version,
@@ -103,7 +103,7 @@ instruction-level parallelism a bit. First, for SIMD abstraction purposes, let's
 introduce the following trait.
 
 ```rust,no_run
-{{#include ../counter/src/lib.rs:Accumulator}}
+{{#include ../counter/src/simd/mod.rs:SimdAccumulator}}
 ```
 
 While mostly straightfoward, this trait has a number of generic knobs that we do
@@ -124,7 +124,7 @@ The trait can be easily implemented for both our initial `u64` scalar counter
 and our new `m128i` SIMD counter as follows...
 
 ```rust,no_run
-{{#include ../counter/src/lib.rs:implAccumulator}}
+{{#include ../counter/src/simd/mod.rs:implAccumulator}}
 ```
 
 ...and then we can write a generic SIMD + ILP implementation that can work in
@@ -132,7 +132,7 @@ terms of any implementation of `SimdAccumulator<u64>`, superseding all of our
 previous `_ilp` implementations:
 
 ```rust,no_run
-{{#include ../counter/src/lib.rs:generic_ilp}}
+{{#include ../counter/src/simd/ilp.rs:generic_ilp}}
 ```
 
 With that, we can stop worrying about ILP for now and offload that concern to

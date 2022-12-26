@@ -3,7 +3,7 @@
 Let's start with a simple vector loop that uses the SSE2 instruction set:
 
 ```rust,no_run
-{{#include ../counter/src/lib.rs:simd_basic}}
+{{#include ../counter/src/simd/basic.rs:simd_basic}}
 ```
 
 You may notice strong similarities with the instruction-level parallelism

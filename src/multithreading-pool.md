@@ -15,7 +15,9 @@ This overhead is, as one would expect, less severe when using less threads...
   shard, which reduces communication latency, it takes 8 million iterations. 
 - With 8 threads or 4 poorly pinned threads, it takes 16 million iterations.
 
-...but it's still quite a steep entry ticket. Can we do better?
+...but it's still a big entry cost compared to the optimizations we have done
+previously, which could be problematic in latency-sensitive applications
+like audio processing. Can we do better than that?
 
 Indeed we can because rayon is a general-purpose library, which supports
 features we do not need here like dynamic load balancing and arbitrary task
@@ -47,20 +49,20 @@ a synchronization protocol that is relatively clever. Hence the end result is
 a big chunk of code. Let's go through it step by step.
 
 
-## Read-Modify-Write operations and spinning
+## Read-Modify-Write operations and spin locks
 
 Our synchronization protocol requires some atomic Read-Modify-Write (RMW)
 operations, where a thread must read a value from memory, compute a new
 dependent value, and store it in place of its former self, without other threads
 being able to intervene in the middle.
 
-While x86 CPUs provides native support for such operations on <=64-bit integer
-words, they are very expensive (hundreds of CPU cycles in the absence of
-contention, and that grows super-linearly when contention occurs), so we want as
-few of them per synchronization transaction as possible.
+While x86 CPUs provides native support for such operations on <=64-bit words,
+they are very expensive (hundreds of CPU cycles in the absence of contention,
+and that grows super-linearly when contention occurs), so we want as few of
+them per synchronization transaction as possible.
 
-To support blocking, well implemented operating system mutexes must perform at
-least two of these operations through a lock/unlock cycle:
+To support blocking, well implemented mutexes must perform a minimum of two of
+these operations during a lock/unlock cycle:
 
 - One at locking time to check if the mutex is unlocked and if so lock it.
     * If the mutex is locked, at least one more to tell the thread holding the
@@ -75,12 +77,12 @@ be doable in one blocking OS transaction, so we should never need more than two
 hardware RMW operations in succession on the uncontended path. If we do, it
 means that we're doing something inefficiently.
 
-We can get that down to one hardware RMW atomic operation in two different ways:
+There are two ways to get that down to one single hardware RMW atomic operation:
 
-- If we have only one integer to update, we can do so with a single hardware RMW
-  operation.
-- If we have non-integer or multiple variables to update and we expect updates
-  to take a very short amount of time (<1µs), then we can use a spin lock.
+- If we have only one <=64-bit word to update, we can do it with one hardware
+  RMW operation.
+- If we have multiple variables to update but we expect updates to take a very
+  short amount of time (<1µs), then we can use a spin lock.
 
 This last bit warrants some explanations since [spin locks got a bit of a bad
 reputation recently](https://matklad.github.io//2020/01/02/spinlocks-considered-harmful.html),
@@ -89,7 +91,7 @@ and for good reason: they are a rather specialized tool that tends to be overuse
 Well implemented mutexes differ from well-implemented spin locks in the
 following ways:
 
-1. They need more expensive hardware RMW operations during lock acquisition
+1. Mutexes need more expensive hardware RMW operations during lock acquisition
    to exchange more information with other threads. An RMW operation will always
    be needed, but on some hardware, not all RMW operations are born equal.
     * For example, `fetch_add` is less expensive than `compare_exchange` on x86
@@ -98,17 +100,17 @@ following ways:
       But the more complexity you pile up into a single variable, the more
       likely you are to need the full power of `compare_exchange` or the
       higher-level `fetch_update` abstraction tht Rust builds on top of it.
-2. To detect other blocked threads, they need a hardware RMW operation at unlock
+2. To detect other blocked threads, mutexes need a hardware RMW operation at unlock
    time, as mentioned earlier, whereas unlocking a spin lock only requires a
    write because the in-memory data only has two states, locked and unlocked,
    and only the thread holding the lock can perform the locked -> unlocked
-   state transition.
-3. If they fail to acquire the lock, they will start by busy-waiting in
+   state transition. There is no information for it to read.
+3. If they fail to acquire the lock, mutexes will start by busy-waiting in
    userspace, but then eventually tell the OS scheduler that they are waiting
    for something. The OS can use this information to schedule them out and
    priorize running the thread holding the lock that they depend on. This is not
-   possible with spin locks, which are doomed to either burn CPU cycles or defer
-   to random other unscheduled threads for unbounded amounts of time.
+   possible with spin locks, which are doomed to either burn CPU cycles or yield
+   to random other OS threads for unknown amounts of time.
 
 Spin locks are used to avoid costs #1 and #2 (expensive RMW operations) at the
 cost of losing benefit #3 (efficient blocking during long waits).
@@ -118,14 +120,14 @@ important, much more so than cheaping out on hardware RMW operations. Therefore,
 [spin locks are only efficient when long waits are exceptional, and their
 performance degrades horribly as contention goes
 up](https://matklad.github.io/2020/01/04/mutexes-are-faster-than-spinlocks.html).
-
 Thus, they require a very well-controlled execution environment where you can
 confidently assert that CPU cores are not oversubscribed for extended periods of
-time. As a result, they are only relevant for specialized use cases, not
-general-purpose applications. However, "specialized use case" is basically the
-leitmotiv of this book, so obviously I can and will provide the right
-environment guarantees for the sake of reaping those nice little spinlock perf
-profits.
+time. And as a result, they are only relevant for specialized use cases, not
+general-purpose applications.
+
+However, "specialized use case" is basically the motto of this book, so
+obviously I can and will provide the right environment guarantees for the sake
+of reaping those nice little spinlock perf profits.
 
 And thus, when I'll need to do batches of read-modify-write operations, I'll
 allow myself to lock them through the following spin waiting mechanism. Which,
@@ -133,7 +135,7 @@ conveniently enough, is also generic enough to be usable as part of a blocking
 synchronization strategy.
 
 ```rust,no_run
-{{#include ../counter/src/lib.rs:spinlock}}
+{{#include ../counter/src/thread/pool.rs:spin_loop}}
 ```
 
 
@@ -149,13 +151,13 @@ so let's be generic over components implementing this logic via the following
 trait...
 
 ```rust,no_run
-{{#include ../counter/src/lib.rs:JobScheduler}}
+{{#include ../counter/src/thread/pool.rs:JobScheduler}}
 ```
 
-...which is easy to implement using an atomic variable and a Barrier.
+...which is easy to implement using an atomic variable and a standard Barrier.
 
 ```rust,no_run
-{{#include ../counter/src/lib.rs:BasicScheduler}}
+{{#include ../counter/src/thread/pool.rs:BasicScheduler}}
 ```
 
 Here, I am using a standard Barrier to have worker threads wait for job and
@@ -179,7 +181,7 @@ single machine word, and so cannot update both with a single hardware atomic
 read-modify-write operations. Thus we need locking to provide logical atomicity.
 
 ```rust,no_run
-{{#include ../counter/src/lib.rs:Aggregator}}
+{{#include ../counter/src/thread/pool.rs:Aggregator}}
 ```
 
 The only interesting things within this code are the atomic memory orderings,
@@ -196,7 +198,7 @@ define the state shared between all processing threads, as well as its basic
 transactions.
 
 ```rust,no_run
-{{#include ../counter/src/lib.rs:SharedState}}
+{{#include ../counter/src/thread/pool.rs:SharedState}}
 ```
 
 This is a bit large, let's go through it step by step.
@@ -238,7 +240,7 @@ threads, provide the top-level counting API, and making sure that when the main
 thread exits, it warns worker threads so they exit too.
 
 ```rust,no_run
-{{#include ../counter/src/lib.rs:BackgroundThreads}}
+{{#include ../counter/src/thread/pool.rs:ThreadPool}}
 ```
 
 And with that, we have a full custom parallel counting implementation that we

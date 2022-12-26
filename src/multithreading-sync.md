@@ -25,13 +25,13 @@ foot with lost wake-ups in naive usage. But it is unfortunate that it does so
 at the cost of making this synchronization primitive a poor pick in code where
 performance matters.
 
-So if want to go faster, we'll need to skip the middleman and go lower-level,
+So if we want to go faster, we'll need to skip the middleman and go lower-level,
 down to `futex()` and its cousins on other OSes. Fortunately, the `atomic_wait`
 crate provides a least common denominator platform abstraction layer across all
 popular desktop operating systems.
 
 ```rust,no_run
-{{#include ../counter/src/lib.rs:thread_sync}}
+{{#include ../counter/src/thread/sync.rs:FutexScheduler}}
 ```
 
 How does that change in synchronization strategy affect performance?
