@@ -195,7 +195,8 @@ impl JobScheduler for BasicScheduler {
 
 // ANCHOR: Aggregator
 /// Mechanism to collect processing thread results and detect termination
-struct Aggregator {
+#[derive(Debug)]
+pub struct Aggregator {
     /// Spin lock used to synchronize concurrent read-modify-write operations
     ///
     /// Initially `false`, set to `true` while the lock is held.
@@ -255,9 +256,28 @@ impl Aggregator {
         Ok(self.result.load(Ordering::Relaxed))
     }
 
+    /// Number of threads that still need to provide a result
+    /// Racey and only meant for single-threaded validation purposes
+    pub(crate) fn remaining_tasks(&self) -> u32 {
+        self.remaining_tasks.load(atomic::Ordering::Relaxed)
+    }
+
+    /// Current aggregated result
+    /// Racey and only meant for single-threaded validation purposes
+    pub(crate) fn result(&self) -> u64 {
+        self.result.load(atomic::Ordering::Relaxed)
+    }
+
     /// Acquire spin lock
     fn lock(&self) -> AggregatorGuard {
         use atomic::Ordering;
+
+        // If we are the last thread, we do not need a lock
+        if self.remaining_tasks.load(Ordering::Relaxed) == 1 {
+            atomic::fence(Ordering::Acquire);
+            return AggregatorGuard(self);
+        }
+
         loop {
             // Try to opportunistically acquire the lock
             if self.spin_lock.swap(true, Ordering::Acquire) == false {

@@ -42,6 +42,6 @@ However, any synchronization that we do ourselves using atomic shared state will
 need to be reworked to follow the scalability guidelines outlined above.
 
 
-## Tree-based synchronization
+## Result aggregation tree
 
 TODO: Use reduction trees with const MAX_ARITY + lstopo-driven splitting.

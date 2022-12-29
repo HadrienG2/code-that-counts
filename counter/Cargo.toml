@@ -13,6 +13,7 @@ harness = false
 [dependencies]
 atomic = { version = "0.5", default-features = false }
 atomic-wait = "1.0"
+crossbeam-utils = "0.8"
 hwloc2 = "2.2"
 num-traits = "0.2"
 pessimize = { git = "https://github.com/HadrienG2/pessimize.git", features = ["safe_arch"] }

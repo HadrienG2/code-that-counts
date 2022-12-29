@@ -132,6 +132,7 @@ dependencies = [
  "atomic",
  "atomic-wait",
  "criterion",
+ "crossbeam-utils",
  "hwloc2",
  "num-traits",
  "once_cell",
