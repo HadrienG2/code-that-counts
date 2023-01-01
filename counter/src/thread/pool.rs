@@ -64,18 +64,12 @@ fn spin_loop<const INFINITE: bool, Ready>(
 
 // ANCHOR: JobScheduler
 /// Mechanism to synchronize job startup and error handling
-pub trait JobScheduler {
-    /// Set up synchronization
-    fn new(num_threads: u32) -> Self;
-
-    /// Minimum accepted parallel job size, please run smaller jobs sequentially
+pub trait JobScheduler: Sync {
+    /// Minimum accepted parallel job size, smaller jobs must be run sequentially
     const MIN_TARGET: u64;
 
     /// Start a job
-    ///
-    /// `num_threads` must be the same value that was passed to `new()`.
-    ///
-    fn start(&self, target: u64, num_threads: u32);
+    fn start(&self, target: u64);
 
     /// Request all threads to stop
     fn stop(&self);
@@ -135,8 +129,9 @@ pub struct BasicScheduler {
     barrier: std::sync::Barrier,
 }
 //
-impl JobScheduler for BasicScheduler {
-    fn new(num_threads: u32) -> Self {
+impl BasicScheduler {
+    /// Set up a new BasicScheduler
+    pub fn new(num_threads: u32) -> Self {
         use atomic::Atomic;
         use std::{num::NonZeroU64, sync::Barrier};
         assert!(Atomic::<Option<NonZeroU64>>::is_lock_free());
@@ -145,11 +140,13 @@ impl JobScheduler for BasicScheduler {
             barrier: Barrier::new(num_threads.try_into().unwrap()),
         }
     }
-
+}
+//
+impl JobScheduler for BasicScheduler {
     // We're reserving `target` == 0 for requests to stop
     const MIN_TARGET: u64 = 1;
 
-    fn start(&self, target: u64, _num_threads: u32) {
+    fn start(&self, target: u64) {
         use std::{num::NonZeroU64, sync::atomic::Ordering};
 
         // Package the counting request
@@ -193,10 +190,77 @@ impl JobScheduler for BasicScheduler {
 }
 // ANCHOR_END: BasicScheduler
 
-// ANCHOR: Aggregator
-/// Mechanism to collect processing thread results and detect termination
-#[derive(Debug)]
-pub struct Aggregator {
+// ANCHOR: Reducer
+/// Synchronization primitive that aggregates per-thread contributions and can
+/// tell when all threads have provided their contribution.
+///
+/// Logically equivalent to the combination of an atomic thread counter and
+/// an atomic accumulator of results, where results are accumulated before
+/// decreasing the thread counter.
+///
+pub trait Reducer: Sync {
+    /// Clear the accumulator and prepare for `num_threads` contributions
+    ///
+    /// This is meant for use by the main thread inbetween jobs and should not
+    /// be called while worker threads may observe the state of this object.
+    ///
+    fn reset(&self, num_threads: u32);
+
+    /// Truth that not all threads have submitted their contribution yet
+    ///
+    /// If this is used for synchronization purposes, it should be followed by
+    /// an `Acquire` memory barrier.
+    ///
+    fn has_remaining_threads(&self) -> bool;
+
+    /// Optional data payload that threads can contribute
+    ///
+    /// In the special case where this is `()`, this `Reducer` just counts down
+    /// until all threads have called `thread_done`, as a barrier of sorts.
+    ///
+    type Contribution;
+
+    /// Sum of aggregated contributions for all threads so far
+    fn current_result(&self) -> Self::Contribution;
+
+    /// Wait for all contributions to have been received or an error to occur
+    fn wait_for_end_result(
+        &self,
+        scheduler: &impl JobScheduler,
+    ) -> Result<Self::Contribution, Stopped> {
+        let res = scheduler.faillible_spin_wait(|| !self.has_remaining_threads());
+        atomic::fence(atomic::Ordering::Acquire);
+        res.map(|Done| self.current_result())
+    }
+
+    /// Accumulator identifier
+    ///
+    /// Some Reducers have an internal structure, where threads can target
+    /// multiple inner accumulators. This identifies one such accumulator.
+    ///
+    type AccumulatorId: Copy;
+
+    /// Process a contribution from one thread
+    ///
+    /// If this was the last thread, it gets the full aggregated job result.
+    ///
+    /// The notification that this thread has passed by and the check for job
+    /// completion are performed as if done by a single atomic read-modify-write
+    /// operation with the specified memory ordering.
+    ///
+    fn thread_done(
+        &self,
+        contribution: Self::Contribution,
+        ordering: atomic::Ordering,
+        accumulator_idx: Self::AccumulatorId,
+    ) -> Option<Self::Contribution>;
+}
+// ANCHOR_END: Reducer
+
+/// Mechanism to collect processing thread results and detect job completion
+// ANCHOR: BasicResultReducer
+#[derive(Default)]
+pub struct BasicResultReducer {
     /// Spin lock used to synchronize concurrent read-modify-write operations
     ///
     /// Initially `false`, set to `true` while the lock is held.
@@ -210,78 +274,32 @@ pub struct Aggregator {
     /// reaches 0, it tells the thread that last decremented it that all
     /// worker threads are done, with Acquire/Release synchronization.
     ///
-    remaining_tasks: atomic::Atomic<u32>,
+    remaining_threads: atomic::Atomic<u32>,
 
     /// Sum of partial computation results
     result: atomic::Atomic<u64>,
 }
 //
-impl Aggregator {
-    /// Create a new aggregator
+impl BasicResultReducer {
+    /// Create a new result reducer
     pub fn new() -> Self {
-        use atomic::Atomic;
-        Self {
-            spin_lock: Atomic::new(false),
-            remaining_tasks: Atomic::new(0),
-            result: Atomic::default(),
-        }
-    }
-
-    /// Prepare the aggregator for a new job
-    ///
-    /// This should be done before starting a new job, and after any previously
-    /// scheduled job have finished running.
-    ///
-    pub fn reset(&self, num_threads: u32) {
-        use atomic::Ordering;
-        debug_assert!(!self.spin_lock.load(Ordering::Relaxed));
-        debug_assert_eq!(self.remaining_tasks.load(Ordering::Relaxed), 0);
-        self.remaining_tasks.store(num_threads, Ordering::Relaxed);
-        self.result.store(0, Ordering::Relaxed);
-    }
-
-    /// Aggregate a thread's partial results, tell the job's result if finished
-    pub fn task_done(&self, result: u64) -> Option<u64> {
-        use atomic::Ordering;
-        let mut lock = self.lock();
-        let merged_result = lock.merge_result(result, Ordering::Relaxed);
-        lock.notify_done(Ordering::Release).then_some(merged_result)
-    }
-
-    /// Wait for the job to be done or error out, collect the result
-    pub fn wait_for_result(&self, scheduler: &impl JobScheduler) -> Result<u64, Stopped> {
-        use atomic::Ordering;
-        scheduler.faillible_spin_wait(|| self.remaining_tasks.load(Ordering::Relaxed) == 0)?;
-        atomic::fence(Ordering::Acquire);
-        Ok(self.result.load(Ordering::Relaxed))
-    }
-
-    /// Number of threads that still need to provide a result
-    /// Racey and only meant for single-threaded validation purposes
-    pub(crate) fn remaining_tasks(&self) -> u32 {
-        self.remaining_tasks.load(atomic::Ordering::Relaxed)
-    }
-
-    /// Current aggregated result
-    /// Racey and only meant for single-threaded validation purposes
-    pub(crate) fn result(&self) -> u64 {
-        self.result.load(atomic::Ordering::Relaxed)
+        Self::default()
     }
 
     /// Acquire spin lock
-    fn lock(&self) -> AggregatorGuard {
+    fn lock(&self) -> ReducerGuard {
         use atomic::Ordering;
 
         // If we are the last thread, we do not need a lock
-        if self.remaining_tasks.load(Ordering::Relaxed) == 1 {
+        if self.remaining_threads.load(Ordering::Relaxed) == 1 {
             atomic::fence(Ordering::Acquire);
-            return AggregatorGuard(self);
+            return ReducerGuard(self);
         }
 
         loop {
             // Try to opportunistically acquire the lock
             if self.spin_lock.swap(true, Ordering::Acquire) == false {
-                return AggregatorGuard(self);
+                return ReducerGuard(self);
             }
 
             // Otherwise, wait for it to become available before retrying
@@ -296,11 +314,51 @@ impl Aggregator {
         }
     }
 }
-
-/// Equivalent of `MutexGuard` for the Aggregator spin lock
-struct AggregatorGuard<'aggregator>(&'aggregator Aggregator);
 //
-impl<'aggregator> AggregatorGuard<'aggregator> {
+impl Reducer for BasicResultReducer {
+    fn reset(&self, num_threads: u32) {
+        use atomic::Ordering;
+        debug_assert!(!self.spin_lock.load(Ordering::Relaxed));
+        debug_assert_eq!(self.remaining_threads.load(Ordering::Relaxed), 0);
+        self.remaining_threads.store(num_threads, Ordering::Relaxed);
+        self.result.store(0, Ordering::Relaxed);
+    }
+
+    fn has_remaining_threads(&self) -> bool {
+        self.remaining_threads.load(atomic::Ordering::Relaxed) != 0
+    }
+
+    type Contribution = u64;
+
+    fn current_result(&self) -> u64 {
+        self.result.load(atomic::Ordering::Relaxed)
+    }
+
+    type AccumulatorId = ();
+
+    fn thread_done(&self, result: u64, mut ordering: atomic::Ordering, (): ()) -> Option<u64> {
+        use atomic::Ordering;
+
+        // Enforce a Release barrier so that threads observing this
+        // notification with Acquire ordering also observe the merged results
+        match ordering {
+            Ordering::Relaxed => ordering = Ordering::Release,
+            Ordering::Acquire => ordering = Ordering::AcqRel,
+            Ordering::Release | Ordering::AcqRel | Ordering::SeqCst => {}
+            _ => unimplemented!(),
+        }
+
+        // Merge our results, expose job results if done
+        let mut lock = self.lock();
+        let merged_result = lock.merge_result(result, Ordering::Relaxed);
+        lock.notify_done(ordering).then_some(merged_result)
+    }
+}
+//
+/// Equivalent of `MutexGuard` for the BasicResultReducer spin lock
+struct ReducerGuard<'aggregator>(&'aggregator BasicResultReducer);
+//
+impl<'aggregator> ReducerGuard<'aggregator> {
     /// Merge partial result `result`, get the current sum of partial results
     pub fn merge_result(&mut self, result: u64, order: atomic::Ordering) -> u64 {
         self.fetch_update(
@@ -311,14 +369,19 @@ impl<'aggregator> AggregatorGuard<'aggregator> {
         )
     }
 
-    /// Notify that this thread is done, tell if the job is done
+    /// Notify that this thread is done, tell how many threads remain
     pub fn notify_done(&mut self, order: atomic::Ordering) -> bool {
-        self.fetch_update(&self.0.remaining_tasks, order, |old| old > 0, |old| old - 1) == 0
+        self.fetch_update(
+            &self.0.remaining_threads,
+            order,
+            |old| old > 0,
+            |old| old - 1,
+        ) == 0
     }
 
     /// Read-Modify_Write operation that is not atomic in hardware, but
     /// logically atomic if all concurrent writes to the target atomic variable
-    /// require exclusive access to the spinlock-protected AggrecatorGuard
+    /// require exclusive access to the spinlock-protected ReducerGuard
     ///
     /// In debug builds, the `check` sanity check is first performed on the
     /// existing value, then a new value is computed through `change`, inserted
@@ -340,7 +403,8 @@ impl<'aggregator> AggregatorGuard<'aggregator> {
         new
     }
 
-    /// Load and store ordering of non-atomic read-modify-write operations
+    /// Load and store ordering to be used when emulating an atomic
+    /// read-modify-write operation under lock protection
     fn rmw_order(order: atomic::Ordering) -> [atomic::Ordering; 2] {
         use atomic::Ordering;
         match order {
@@ -353,71 +417,75 @@ impl<'aggregator> AggregatorGuard<'aggregator> {
     }
 }
 //
-impl<'aggregator> Drop for AggregatorGuard<'aggregator> {
+impl<'aggregator> Drop for ReducerGuard<'aggregator> {
     fn drop(&mut self) {
         self.0.spin_lock.store(false, atomic::Ordering::Release);
     }
 }
-// ANCHOR_END: Aggregator
+// ANCHOR_END: BasicResultReducer
 
 // ANCHOR: SharedState
 /// State shared between the main thread and worker threads
-struct SharedState<Counter: Fn(u64) -> u64 + Sync, Scheduler> {
+struct SharedState<Counter: Fn(u64) -> u64 + Sync, Scheduler, ResultReducer: Reducer> {
     /// Counter implementation
     counter: Counter,
 
-    /// Number of processing threads, including main thread
-    num_threads: u32,
+    /// Assignment of threads to reducer slots
+    thread_ids: Box<[ResultReducer::AccumulatorId]>,
 
     /// Mechanism to synchronize job startup and error handling
     scheduler: Scheduler,
 
     /// Mechanism to synchronize task and job completion
-    aggregator: Aggregator,
+    result_reducer: ResultReducer,
 }
 //
-impl<Counter: Fn(u64) -> u64 + std::panic::RefUnwindSafe + Sync, Scheduler: JobScheduler>
-    SharedState<Counter, Scheduler>
+impl<
+        Counter: Fn(u64) -> u64 + std::panic::RefUnwindSafe + Sync,
+        Scheduler: JobScheduler,
+        ResultReducer: Reducer<Contribution = u64>,
+    > SharedState<Counter, Scheduler, ResultReducer>
 {
     /// Set up shared state
-    pub fn new(counter: Counter, num_threads: u32) -> Self {
+    pub fn new(
+        counter: Counter,
+        thread_ids: Box<[ResultReducer::AccumulatorId]>,
+        scheduler: Scheduler,
+        result_reducer: ResultReducer,
+    ) -> Self {
+        assert!(thread_ids.len() < usize::try_from(u32::MAX).unwrap());
         Self {
             counter,
-            num_threads,
-            scheduler: Scheduler::new(num_threads),
-            aggregator: Aggregator::new(),
+            thread_ids,
+            scheduler,
+            result_reducer,
         }
     }
 
     /// Schedule counting work and wait for the end result
     pub fn count(&self, target: u64) -> u64 {
         // Handle sequential special cases
-        if self.num_threads == 1 || target < Scheduler::MIN_TARGET {
+        if self.num_threads() == 1 || target < Scheduler::MIN_TARGET {
             return (self.counter)(target);
         }
 
         // Schedule job
         let debug_log = |action| debug_log(true, action);
         debug_log("scheduling a new job");
-        self.aggregator.reset(self.num_threads);
-        self.scheduler.start(target, self.num_threads);
+        self.result_reducer.reset(self.num_threads());
+        self.scheduler.start(target);
 
         // Do our share of the work
-        let result = self
-            .process(target, Self::MAIN_THREAD as u64)
-            .unwrap_or_else(|| {
-                // If we're not finishing last, wait for workers to finish
-                debug_log("waiting for the job's result");
-                self.aggregator
-                    .wait_for_result(&self.scheduler)
-                    .expect("This job won't end because some workers have stopped")
-            });
+        let result = self.process(target, Self::MAIN_THREAD).unwrap_or_else(|| {
+            // If we're not finishing last, wait for workers to finish
+            debug_log("waiting for the job's result");
+            self.result_reducer
+                .wait_for_end_result(&self.scheduler)
+                .expect("This job won't end because some workers have stopped")
+        });
         debug_log("done");
         result
     }
-
-    /// Thread index of the main thread
-    const MAIN_THREAD: u32 = 0;
 
     /// Request worker threads to stop
     pub fn stop(&self, is_main: bool) {
@@ -432,7 +500,6 @@ impl<Counter: Fn(u64) -> u64 + std::panic::RefUnwindSafe + Sync, Scheduler: JobS
         let debug_log = |action| debug_log(false, action);
         if let Err(payload) = std::panic::catch_unwind(AssertUnwindSafe(|| {
             // Normal work loop
-            let thread_idx = thread_idx as u64;
             debug_log("waiting for its first job");
             while let Ok(target) = self.scheduler.wait_for_task() {
                 self.process(target, thread_idx);
@@ -447,17 +514,28 @@ impl<Counter: Fn(u64) -> u64 + std::panic::RefUnwindSafe + Sync, Scheduler: JobS
         }
     }
 
+    /// Thread index of the main thread
+    const MAIN_THREAD: u32 = 0;
+
+    /// Number of threads managed by this SharedState
+    fn num_threads(&self) -> u32 {
+        self.thread_ids.len() as u32
+    }
+
     /// Process this thread's share of a job, tell if the job is done
-    fn process(&self, target: u64, thread_idx: u64) -> Option<u64> {
+    fn process(&self, target: u64, thread_idx: u32) -> Option<u64> {
+        // Discriminate main thread from worker thread
+        let is_main = thread_idx == Self::MAIN_THREAD;
+        let is_worker = !is_main;
+
         // Determine which share of the counting work we'll take
-        let num_threads = self.num_threads as u64;
+        let thread_idx = thread_idx as u64;
+        let num_threads = self.num_threads() as u64;
         let base_share = target / num_threads;
         let extra = target % num_threads;
         let share = base_share + (thread_idx < extra) as u64;
 
         // Do the counting work
-        let is_main = thread_idx == Self::MAIN_THREAD as u64;
-        let is_worker = !is_main;
         let debug_log = |action| debug_log(is_main, action);
         debug_log("executing its task");
         let result = (self.counter)(share);
@@ -470,7 +548,11 @@ impl<Counter: Fn(u64) -> u64 + std::panic::RefUnwindSafe + Sync, Scheduler: JobS
 
         // Merge our partial result into the global result
         debug_log("merging its result contribution");
-        self.aggregator.task_done(result)
+        self.result_reducer.thread_done(
+            result,
+            atomic::Ordering::Release,
+            self.thread_ids[thread_idx as usize],
+        )
     }
 }
 
@@ -485,8 +567,8 @@ fn debug_log(is_main: bool, action: &str) {
 }
 // ANCHOR_END: SharedState
 
-// ANCHOR: ThreadPool
-pub struct ThreadPool<
+// ANCHOR: BasicThreadPool
+pub struct BasicThreadPool<
     Counter: Fn(u64) -> u64 + std::panic::RefUnwindSafe + Sync + 'static,
     Scheduler: JobScheduler,
 > {
@@ -494,16 +576,20 @@ pub struct ThreadPool<
     _workers: Box<[std::thread::JoinHandle<()>]>,
 
     /// State shared with worker threads
-    state: std::sync::Arc<SharedState<Counter, Scheduler>>,
+    state: std::sync::Arc<SharedState<Counter, Scheduler, BasicResultReducer>>,
 }
 //
 impl<
         Counter: Fn(u64) -> u64 + std::panic::RefUnwindSafe + Send + Sync + 'static,
-        Scheduler: JobScheduler + Send + Sync + 'static,
-    > ThreadPool<Counter, Scheduler>
+        Scheduler: JobScheduler + Send + 'static,
+    > BasicThreadPool<Counter, Scheduler>
 {
     /// Set up worker threads with a certain counter implementation
-    pub fn start(counter: Counter) -> Self {
+    ///
+    /// `make_scheduler` takes a number of threads as a parameter and sets up a
+    /// Scheduler that can work with this number of threads.
+    ///
+    pub fn start(counter: Counter, make_scheduler: impl FnOnce(u32) -> Scheduler) -> Self {
         use std::{sync::Arc, thread};
 
         let num_threads = u32::try_from(
@@ -511,9 +597,14 @@ impl<
                 .map(|nzu| usize::from(nzu))
                 .unwrap_or(2),
         )
-        .unwrap();
+        .expect("Number of threads must fit on 32 bits");
 
-        let state = Arc::new(SharedState::new(counter, num_threads));
+        let state = Arc::new(SharedState::new(
+            counter,
+            std::iter::repeat(()).take(num_threads as usize).collect(),
+            make_scheduler(num_threads),
+            BasicResultReducer::new(),
+        ));
         let _workers = (1..num_threads)
             .map(|thread_idx| {
                 let state2 = state.clone();
@@ -536,18 +627,18 @@ impl<
 impl<
         Counter: Fn(u64) -> u64 + std::panic::RefUnwindSafe + Sync + 'static,
         Scheduler: JobScheduler,
-    > Drop for ThreadPool<Counter, Scheduler>
+    > Drop for BasicThreadPool<Counter, Scheduler>
 {
     /// Tell worker threads to exit on Drop: we won't be sending more tasks
     fn drop(&mut self) {
         self.state.stop(true)
     }
 }
-// ANCHOR_END: ThreadPool
+// ANCHOR_END: BasicThreadPool
 
 #[cfg(test)]
 mod tests {
-    use super::{BasicScheduler, ThreadPool};
+    use super::{BasicScheduler, BasicThreadPool};
     use crate::test_utils;
     use once_cell::sync::Lazy;
     use quickcheck::TestResult;
@@ -555,10 +646,11 @@ mod tests {
     use std::{panic::RefUnwindSafe, sync::Mutex};
 
     type CounterBox = Box<dyn Fn(u64) -> u64 + RefUnwindSafe + Send + Sync + 'static>;
-    static BKG_THREADS_BASIC: Lazy<Mutex<ThreadPool<CounterBox, BasicScheduler>>> =
+    static BKG_THREADS_BASIC: Lazy<Mutex<BasicThreadPool<CounterBox, BasicScheduler>>> =
         Lazy::new(|| {
-            Mutex::new(ThreadPool::start(
+            Mutex::new(BasicThreadPool::start(
                 Box::new(crate::simd::multiversion::multiversion_avx2) as _,
+                BasicScheduler::new,
             ))
         });
 

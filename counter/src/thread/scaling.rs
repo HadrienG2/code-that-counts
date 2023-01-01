@@ -1,25 +1,53 @@
-use super::pool::{Aggregator, JobScheduler, Stopped};
+use super::pool::Reducer;
 use crossbeam_utils::CachePadded;
-use hwloc2::CpuSet;
 
-/// Behaves like Aggregator, but with a scalable reduction tree implementation
-#[derive(Debug)]
-pub struct AggregatorTree {
+// AtomicU32 can be used as a very basic Reducer that counts passing threads
+impl Reducer for std::sync::atomic::AtomicU32 {
+    fn reset(&self, num_threads: u32) {
+        self.store(num_threads, atomic::Ordering::Relaxed)
+    }
+
+    fn has_remaining_threads(&self) -> bool {
+        self.load(atomic::Ordering::Relaxed) != 0
+    }
+
+    type Contribution = ();
+
+    fn current_result(&self) {}
+
+    type AccumulatorId = ();
+
+    fn thread_done(&self, (): (), ordering: atomic::Ordering, (): ()) -> Option<()> {
+        match self.fetch_sub(1, ordering) {
+            // All threads have reached the barrier, we're done
+            1 => Some(()),
+
+            // A number of threads greater than announced to `reset()` has
+            // reached the barrier, this is a usage error.
+            0 => panic!("reset() was called with an invalid number of threads"),
+
+            // Not all threads have reached the barrier yet
+            _prev_remaining_threads => None,
+        }
+    }
+}
+
+/// Behaves like a Reducer, but with a scalable reduction tree implementation
+pub struct ReductionTree<Reducer> {
     /// Tree nodes in breadth-first order
-    nodes: Vec<PaddedNode>,
+    nodes: Vec<PaddedNode<Reducer>>,
 
     /// Root node index
     root_idx: usize,
 }
 //
-/// Cache-padded AggregatorNode
-type PaddedNode = CachePadded<AggregatorNode>;
+/// Cache-padded ReductionNode
+type PaddedNode<Reducer> = CachePadded<ReductionNode<Reducer>>;
 //
-/// Node of the AggregatorTree
-#[derive(Debug)]
-struct AggregatorNode {
-    /// Aggregation node
-    aggregator: Aggregator,
+/// Node of the ReductionTree
+struct ReductionNode<Reducer> {
+    /// Reduction node
+    reducer: Reducer,
 
     /// Parent index (root node is its own parent)
     parent_idx: usize,
@@ -28,12 +56,12 @@ struct AggregatorNode {
     num_children: u32,
 }
 //
-impl AggregatorTree {
-    /// Construct an aggregator tree for the active process' CPUset
+impl<R: Default + Reducer<AccumulatorId = ()>> ReductionTree<R> {
+    /// Construct a reduction tree for the active process' CPUset
     ///
     /// In addition to the tree, a vector of thread metadata is produced. This
     /// assigns a CpuSet to each processing thread for pinning purposes, as well
-    /// as a leaf node index in the `AggregatorTree`.
+    /// as a leaf node index in the `ReductionTree`.
     ///
     /// The `max_arity` tuning parameters controls the tradeoff between
     /// thread contention (which leads to slower atomic operations) and
@@ -48,7 +76,7 @@ impl AggregatorTree {
     /// into two second-level nodes with 7 children, each split into one
     /// third-level node with 3 children and another with 4 children, and so on.
     ///
-    pub fn new(topology: &hwloc2::Topology, max_arity: u32) -> (Self, Vec<ThreadConfig>) {
+    pub fn new(topology: &hwloc2::Topology, max_arity: u32) -> (Self, Vec<ThreadConfig<usize>>) {
         assert!(max_arity >= Self::MIN_ARITY, "Need at least a binary tree");
 
         // Fill the tree
@@ -67,21 +95,19 @@ impl AggregatorTree {
         // Set up root node
         match top_children[..] {
             // Normal case where a single root node is returned
-            [AggregatedChild::Node(root_idx)] => result.root_idx = root_idx,
+            [ReducedChild::Node(root_idx)] => result.root_idx = root_idx,
 
             // Single-threaded edge case where no root node has been created
             // because each recursive call to result.fill() deferred root node
             // creation to a higher-level hwloc topology node with more children.
-            [AggregatedChild::Thread(_thread_idx)] => {
-                debug_assert_eq!(threads.len(), 1);
-                debug_assert_eq!(top_children, vec![AggregatedChild::Thread(0)]);
-                result.nodes.push(CachePadded::new(AggregatorNode {
-                    aggregator: Aggregator::new(),
-                    parent_idx: Self::INVALID_IDX,
-                    num_children: 1,
-                }));
-                result.root_idx = result.nodes.len() - 1;
-                result.root().aggregator.reset(1);
+            [ReducedChild::Thread(0)] => {
+                assert_eq!(result.num_nodes(), 0);
+                assert_eq!(threads.len(), 1);
+                result.root_idx = 0;
+                result
+                    .nodes
+                    .push(CachePadded::new(ReductionNode::new(Self::INVALID_IDX, 1)));
+                result.root().reducer.reset(1);
             }
 
             // Returning multiple children cannot happen AFAIK since it means
@@ -96,49 +122,27 @@ impl AggregatorTree {
         (result, threads)
     }
 
-    /// Prepare the aggregator for a new job
-    ///
-    /// For scalability reasons, this only resets the root node. Lower-level
-    /// AggregatorNodes are instead reset in `task_done()` by the last child of
-    /// the node of interest to merge results.
-    ///
-    pub fn reset(&self) {
-        let root = self.root();
-        root.aggregator.reset(root.num_children)
-    }
-
-    /// Aggregate a thread's partial results, tell the job's result if finished
-    pub fn task_done(&self, result: u64, node_idx: usize) -> Option<u64> {
-        // Aggregate our result into the target node
-        let node = &self.nodes[node_idx];
-        let node_result = node.aggregator.task_done(result)?;
-
-        // We're done with this node. Was it the root node?
-        if node_idx != self.root_idx {
-            // If not, reset this node and propagate its results to the parent
-            node.aggregator.reset(node.num_children);
-            self.task_done(node_result, node.parent_idx)
-        } else {
-            // Otherwise, the full aggregation is done
-            Some(node_result)
+    /// Construct a reduction tree that follows the same structure as this one
+    /// but uses a different Reducer, with freshly reset nodes
+    pub fn rebind<R2: Default + Reducer>(&self) -> ReductionTree<R2> {
+        ReductionTree {
+            nodes: self
+                .nodes
+                .iter()
+                .map(|node| CachePadded::new(node.rebind::<R2>()))
+                .collect(),
+            root_idx: self.root_idx,
         }
-    }
-
-    /// Wait for the job to be done or error out, collect the result
-    // NOTE: If this flavor of impl Trait in trait doesn't work, parametrize the
-    //       trait and impl by the JobScheduler.
-    pub fn wait_for_result(&self, scheduler: &impl JobScheduler) -> Result<u64, Stopped> {
-        self.root().aggregator.wait_for_result(scheduler)
     }
 
     /// Translate an hwloc object into nodes or leaves of the reduction tree
     fn add_children(
         &mut self,
-        threads: &mut Vec<ThreadConfig>,
+        threads: &mut Vec<ThreadConfig<usize>>,
         max_arity: u32,
         object: &hwloc2::TopologyObject,
         parent_idx: usize,
-    ) -> Vec<AggregatedChild> {
+    ) -> Vec<ReducedChild> {
         debug_assert!(max_arity >= Self::MIN_ARITY);
 
         // Ignore objects with no CPUs attached early on
@@ -150,7 +154,7 @@ impl AggregatorTree {
         };
 
         // Pass through hwloc objects with only one child, like L1 CPU caches:
-        // they are not interesting from a parallel aggregation perspective, but
+        // they are not interesting from a parallel reduction perspective, but
         // may lead to more interesting children.
         if object.arity() == 1 {
             return self.add_children(threads, max_arity, first_child, parent_idx);
@@ -176,18 +180,19 @@ impl AggregatorTree {
         }
 
         // If control reached this point, then we truly have multiple CPU-bearing
-        // children that we want to aggregate through one or more AggregatorNodes.
-        // Return a list of AggregatorNodes to which children can be attached,
+        // children whose results we want to sum through one or more ReductionNodes.
+        // Return a list of ReductionNodes to which children can be attached,
         // along with a count of how many children they can host.
         let root_idx = self.nodes.len();
-        let parent_capacity = self.add_nodes(max_arity, parent_idx, children.len());
+        let num_children = u32::try_from(children.len()).unwrap();
+        let parent_capacity = self.add_nodes(max_arity, parent_idx, num_children);
         debug_assert_eq!(
             parent_capacity
                 .clone()
                 .into_iter()
                 .map(|(_idx, num_children)| num_children)
                 .sum::<u32>(),
-            children.len() as u32
+            u32::try_from(children.len()).unwrap()
         );
 
         // Deduce an iterator of "children slots" with the right multiplicity
@@ -204,7 +209,7 @@ impl AggregatorTree {
 
         // Expose our root node as the child of the caller
         children.clear();
-        children.push(AggregatedChild::Node(root_idx));
+        children.push(ReducedChild::Node(root_idx));
         children
     }
 
@@ -212,27 +217,24 @@ impl AggregatorTree {
     ///
     /// Threads will be added to the global thread list and also returned as a
     /// children list usable as an `add_children` return value, for the purpose
-    /// of later being bound to AggregatorNodes.
+    /// of later being bound to ReductionNodes.
     ///
     /// The initial parent node index can be invalid, it will be patched later on.
     ///
     fn add_threads(
-        threads: &mut Vec<ThreadConfig>,
-        cpuset: CpuSet,
+        threads: &mut Vec<ThreadConfig<usize>>,
+        cpuset: hwloc2::CpuSet,
         parent_idx: usize,
-    ) -> Vec<AggregatedChild> {
+    ) -> Vec<ReducedChild> {
         let mut children = Vec::with_capacity(usize::try_from(cpuset.weight()).unwrap());
         for cpu in cpuset {
-            children.push(AggregatedChild::Thread(threads.len()));
-            threads.push(ThreadConfig {
-                cpuset: CpuSet::from(cpu),
-                aggregator_idx: parent_idx,
-            });
+            children.push(ReducedChild::Thread(threads.len()));
+            threads.push(ThreadConfig::new(cpu, parent_idx));
         }
         return children;
     }
 
-    /// Set up a (sub-)tree of AggregatorNodes that can hold a number of children
+    /// Set up a (sub-)tree of ReductionNodes that can hold a number of children
     ///
     /// The initial parent node index can be invalid, it will be patched later on.
     ///
@@ -243,17 +245,15 @@ impl AggregatorTree {
         &mut self,
         max_arity: u32,
         parent_idx: usize,
-        num_children: usize,
+        num_children: u32,
     ) -> impl IntoIterator<Item = (usize, u32)> + Clone {
         // Create a root node with as many children as possible
-        let num_children = u32::try_from(num_children).unwrap();
         let first_batch = num_children.min(max_arity);
         let root_idx = self.nodes.len();
-        self.nodes.push(CachePadded::new(AggregatorNode {
-            aggregator: Aggregator::new(),
+        self.nodes.push(CachePadded::new(ReductionNode::new(
             parent_idx,
-            num_children: first_batch,
-        }));
+            first_batch,
+        )));
 
         // If that does not suffice, we will add more children one by
         // one across nodes that can host them, fanning them out in a
@@ -302,11 +302,10 @@ impl AggregatorTree {
             // allowed by arity, it's time to create a new sub-tree. We make it
             // fully filled initially so that we can handle it homogeneously
             // with respect to other sub-trees affected by this operations.
-            self.nodes.push(CachePadded::new(AggregatorNode {
-                aggregator: Aggregator::new(),
-                parent_idx: subtree_parent_idx,
-                num_children: max_arity,
-            }));
+            self.nodes.push(CachePadded::new(ReductionNode::new(
+                subtree_parent_idx,
+                max_arity,
+            )));
 
             // Creating a subtree replaces an existing child and hosts the newly
             // allocated child, making room for (max_arity - 2) more children.
@@ -356,10 +355,10 @@ impl AggregatorTree {
             }
         }
 
-        // At this point, our tree of AggregatorNodes is built.
-        // Configure the associated Aggregators for the right number of children.
+        // At this point, our tree of ReductionNodes is built.
+        // Configure the associated Reducers for the right number of children.
         for node in &mut self.nodes[root_idx..] {
-            node.aggregator.reset(node.num_children);
+            node.reset();
         }
 
         // Now it's time to determine where children can bind in that tree.
@@ -381,7 +380,7 @@ impl AggregatorTree {
         }
         for parent_idx in subtree_parent_end..self.nodes.len() {
             // Above subtree_parent_end, there are no subtrees yet, so every
-            // child of an AggregatorNode is a direct child.
+            // child of an ReductionNode is a direct child.
             let capacity = self.nodes[parent_idx].num_children;
             parent_capacity.push((parent_idx, capacity));
         }
@@ -389,9 +388,14 @@ impl AggregatorTree {
     }
 
     /// Validate that the output tree is consistent with constructor parameters
-    fn validate(&self, topology: &hwloc2::Topology, max_arity: u32, threads: &Vec<ThreadConfig>) {
+    fn validate(
+        &self,
+        topology: &hwloc2::Topology,
+        max_arity: u32,
+        threads: &Vec<ThreadConfig<usize>>,
+    ) {
         let mut children = vec![vec![]; self.nodes.len()];
-        let mut full_cpuset = CpuSet::new();
+        let mut full_cpuset = hwloc2::CpuSet::new();
 
         for (idx, thread) in threads.into_iter().enumerate() {
             // Check that each thread targets a single, unique CPU
@@ -400,9 +404,9 @@ impl AggregatorTree {
             assert!(!full_cpuset.is_set(cpu));
             full_cpuset.set(cpu);
 
-            // Check that each thread aggregates into a valid AggregatorNode
-            assert!(thread.aggregator_idx < self.nodes.len());
-            children[thread.aggregator_idx].push(AggregatedChild::Thread(idx));
+            // Check that each thread reduces into a valid ReductionNode
+            assert!(thread.accumulator_id < self.nodes.len());
+            children[thread.accumulator_id].push(ReducedChild::Thread(idx));
         }
 
         // Check that threads cover all available CPUs
@@ -411,18 +415,17 @@ impl AggregatorTree {
         // Check that a root node is present
         assert_ne!(self.nodes.len(), 0);
 
-        // Check that AggregatorNodes follow expectations
+        // Check that ReductionNodes follow expectations
         for (idx, node) in self.nodes.iter().enumerate() {
-            // Inner Aggregator has been reset properly
-            assert_eq!(node.aggregator.remaining_tasks(), node.num_children);
-            assert_eq!(node.aggregator.result(), 0);
+            // Inner Reducer has been reset properly
+            assert!(node.has_remaining_threads());
 
-            // Check that each node aggregates into a valid target
+            // Check that each node reduces into a valid target
             if idx == self.root_idx {
                 assert!(node.parent_idx == Self::INVALID_IDX);
             } else {
                 assert!(node.parent_idx < self.nodes.len());
-                children[node.parent_idx].push(AggregatedChild::Node(idx));
+                children[node.parent_idx].push(ReducedChild::Node(idx));
             }
 
             // Check observed arities
@@ -430,7 +433,7 @@ impl AggregatorTree {
             assert!(node.num_children <= max_arity);
         }
 
-        // Compare node child count to actual child count
+        // Compare node child count to actual number of attached children
         for (node, node_children) in self.nodes.iter().zip(children.iter()) {
             assert_eq!(node.num_children, node_children.len() as u32);
         }
@@ -445,7 +448,7 @@ impl AggregatorTree {
                 reached += 1;
                 for child in children[next_node].iter().copied() {
                     match child {
-                        AggregatedChild::Node(idx) => next_nodes.push(idx),
+                        ReducedChild::Node(idx) => next_nodes.push(idx),
                         _ => {}
                     }
                 }
@@ -457,7 +460,7 @@ impl AggregatorTree {
         let mut lines = vec![String::new(); 2 * depth + 1];
         fn print_tree(
             lines: &mut Vec<String>,
-            children: &Vec<Vec<AggregatedChild>>,
+            children: &Vec<Vec<ReducedChild>>,
             root_idx: usize,
             depth: usize,
         ) {
@@ -470,10 +473,10 @@ impl AggregatorTree {
             write!(&mut lines[dash_line], "|").unwrap();
             for child in children[root_idx].iter() {
                 match child {
-                    AggregatedChild::Thread(thread_idx) => {
+                    ReducedChild::Thread(thread_idx) => {
                         write!(&mut lines[child_line], "T{thread_idx} ").unwrap();
                     }
-                    AggregatedChild::Node(child_idx) => {
+                    ReducedChild::Node(child_idx) => {
                         print_tree(lines, children, *child_idx, depth + 1)
                     }
                 }
@@ -509,42 +512,125 @@ impl AggregatorTree {
     const INVALID_IDX: usize = usize::MAX;
 
     /// Shared access to the root node
-    fn root(&self) -> &AggregatorNode {
+    fn root(&self) -> &ReductionNode<R> {
         &self.nodes[self.root_idx]
+    }
+
+    /// Current number of allocated nodes
+    fn num_nodes(&self) -> u32 {
+        u32::try_from(self.nodes.len()).unwrap()
     }
 }
 //
-/// Assignment of worker threads to CPUs and aggregator tree nodes
-#[derive(Clone, Debug, PartialEq)]
-pub struct ThreadConfig {
-    /// CpuSet to be used when pinning this thread to its target CPU
-    pub cpuset: hwloc2::CpuSet,
+impl<R: Default + Reducer<AccumulatorId = ()>> Reducer for ReductionTree<R> {
+    // For scalability reasons, this only resets the root node. Lower-level
+    // ReductionNodes are instead reset in `thread_done()` by the last child of
+    // the node of interest to merge results.
+    fn reset(&self, _num_threads: u32) {
+        self.root().reset()
+    }
 
-    /// Index of the parent AggregatorNode in the AggregatorTree
-    pub aggregator_idx: usize,
+    fn has_remaining_threads(&self) -> bool {
+        self.root().has_remaining_threads()
+    }
+
+    type Contribution = R::Contribution;
+
+    fn current_result(&self) -> R::Contribution {
+        self.root().current_result()
+    }
+
+    type AccumulatorId = usize;
+
+    fn thread_done(
+        &self,
+        result: R::Contribution,
+        ordering: atomic::Ordering,
+        node_idx: usize,
+    ) -> Option<R::Contribution> {
+        // Add our result into the target node
+        let node = &self.nodes[node_idx];
+        let node_result = node.thread_done(result, ordering)?;
+
+        // We're done with this node. Was it the root node?
+        if node_idx != self.root_idx {
+            // If not, reset this node and propagate its results to the parent
+            node.reset();
+            self.thread_done(node_result, ordering, node.parent_idx)
+        } else {
+            // Otherwise, the full reduction is done
+            Some(node_result)
+        }
+    }
 }
 //
-/// Child of an AggregatorNode
+impl<R: Default + Reducer<AccumulatorId = ()>> ReductionNode<R> {
+    /// Create a new node
+    fn new(parent_idx: usize, num_children: u32) -> Self {
+        Self {
+            reducer: R::default(),
+            parent_idx,
+            num_children,
+        }
+    }
+
+    /// Prepare this node for the next accumulation cycle
+    fn reset(&self) {
+        self.reducer.reset(self.num_children)
+    }
+
+    /// Check if all children of this node are done accumulating
+    fn has_remaining_threads(&self) -> bool {
+        self.reducer.has_remaining_threads()
+    }
+
+    /// Check out the current sum of contributions for this node
+    fn current_result(&self) -> R::Contribution {
+        self.reducer.current_result()
+    }
+
+    /// Notify that one child of this node is done, aggregate result
+    fn thread_done(
+        &self,
+        result: R::Contribution,
+        ordering: atomic::Ordering,
+    ) -> Option<R::Contribution> {
+        self.reducer.thread_done(result, ordering, ())
+    }
+
+    /// Make a freshly reset copy of this node with the reducer type changed
+    fn rebind<R2: Default + Reducer>(&self) -> ReductionNode<R2> {
+        let reducer = R2::default();
+        reducer.reset(self.num_children);
+        ReductionNode {
+            reducer,
+            parent_idx: self.parent_idx,
+            num_children: self.num_children,
+        }
+    }
+}
+
+/// Child of a ReductionNode
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
-enum AggregatedChild {
+enum ReducedChild {
     /// Leaf CPU thread
     Thread(usize),
 
-    /// Other AggregatorNode
+    /// Other ReductionNode
     Node(usize),
 }
 //
-impl AggregatedChild {
+impl ReducedChild {
     /// Rebind this child to a different parent node
-    fn rebind(
+    fn rebind<R>(
         &self,
-        tree: &mut AggregatorTree,
-        threads: &mut Vec<ThreadConfig>,
+        tree: &mut ReductionTree<R>,
+        threads: &mut Vec<ThreadConfig<usize>>,
         parent_idx: usize,
     ) {
         match self {
             Self::Thread(idx) => {
-                threads[*idx].aggregator_idx = parent_idx;
+                threads[*idx].accumulator_id = parent_idx;
             }
             Self::Node(idx) => {
                 tree.nodes[*idx].parent_idx = parent_idx;
@@ -553,16 +639,46 @@ impl AggregatedChild {
     }
 }
 
-// TODO: Add a ResultAggregator trait implemented by both Aggregator and
-//       AggregatorTree. Need to dummy out ThreadConfig and node_idx in the
-//       regular Aggregator.
+/// Assignment of worker threads to CPUs and reducer accumulators
+#[derive(Clone, Debug, PartialEq)]
+pub struct ThreadConfig<AccumulatorId> {
+    /// CpuSet to be used when pinning this thread to its target CPU
+    cpuset: hwloc2::CpuSet,
+
+    /// Accumulator to be used when merging results
+    accumulator_id: AccumulatorId,
+}
+//
+impl<AccumulatorId> ThreadConfig<AccumulatorId> {
+    /// Set up a thread config for a certain CPU and accumulator ID
+    pub fn new(cpu: u32, accumulator_id: AccumulatorId) -> Self {
+        Self {
+            cpuset: hwloc2::CpuSet::from(cpu),
+            accumulator_id,
+        }
+    }
+
+    /// Bind the active thread to this CPU, get the accumulator ID
+    pub fn bind_this_thread(self, topology: &mut hwloc2::Topology) -> AccumulatorId {
+        topology
+            .set_cpubind(self.cpuset, hwloc2::CpuBindFlags::CPUBIND_THREAD)
+            .unwrap();
+        self.accumulator_id
+    }
+}
 
 // TODO: Also do a reduction tree for FutexScheduler, then see if I can find
 //       some commonalities.
+// FIXME: Roll out a new ScalableThreadPool that binds all worker threads and
+//        the main thread. Make it !Send so that the main thread binding can
+//        be assumed to remain valid after ThreadPool::new()
+// TODO: Oh and brind the AccumulatorId to JobScheduler too
+// TODO: Update multithreading-pool.md according to visible design changes.
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::thread::pool::BasicResultReducer;
     use hwloc2::Topology;
 
     #[test]
@@ -573,8 +689,8 @@ mod tests {
             .unwrap_or(2) as u32
             + 1)
         {
-            // Create an AggregatorTree, rely on debug assertions to check it
-            AggregatorTree::new(&topology, max_arity);
+            // Create a ReductionTree, rely on debug assertions to check it
+            ReductionTree::<BasicResultReducer>::new(&topology, max_arity);
         }
     }
 }

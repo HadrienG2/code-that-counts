@@ -2,6 +2,9 @@ use super::pool::{JobScheduler, Stopped};
 
 // ANCHOR: FutexScheduler
 pub struct FutexScheduler {
+    /// Number of threads targeted by this FutexScheduler
+    num_threads: u32,
+
     /// Number of tasks to be grabbed or request to stop
     ///
     /// In normal operation, when a job is submitted, the main thread sets this
@@ -22,8 +25,9 @@ pub struct FutexScheduler {
     request: atomic::Atomic<u64>,
 }
 //
-impl JobScheduler for FutexScheduler {
-    fn new(num_threads: u32) -> Self {
+impl FutexScheduler {
+    /// Set up a new FutexScheduler
+    pub fn new(num_threads: u32) -> Self {
         use atomic::Atomic;
         use std::sync::atomic::AtomicU32;
         assert!(
@@ -32,14 +36,17 @@ impl JobScheduler for FutexScheduler {
             Self::STOP_THRESHOLD
         );
         Self {
+            num_threads,
             task_futex: AtomicU32::new(0),
             request: Atomic::default(),
         }
     }
-
+}
+//
+impl JobScheduler for FutexScheduler {
     const MIN_TARGET: u64 = 0;
 
-    fn start(&self, target: u64, num_threads: u32) {
+    fn start(&self, target: u64) {
         use atomic::Ordering;
 
         // Publish the target, that's not synchronization-critical
@@ -47,7 +54,6 @@ impl JobScheduler for FutexScheduler {
 
         // Publish one task per worker thread, making sure that worker threads
         // have not stopped on the other side of the pipeline.
-        debug_assert!(num_threads < Self::STOP_THRESHOLD);
         self.task_futex
             .fetch_update(Ordering::Release, Ordering::Relaxed, |old| {
                 assert!(
@@ -55,7 +61,7 @@ impl JobScheduler for FutexScheduler {
                     "Can't schedule this new job, some workers have stopped"
                 );
                 debug_assert_eq!(old, Self::NO_TASK);
-                Some(num_threads - 1)
+                Some(self.num_threads - 1)
             })
             .unwrap();
 
@@ -119,17 +125,18 @@ impl FutexScheduler {
 #[cfg(test)]
 mod tests {
     use super::FutexScheduler;
-    use crate::{test_utils, thread::pool::ThreadPool};
+    use crate::{test_utils, thread::pool::BasicThreadPool};
     use once_cell::sync::Lazy;
     use quickcheck::TestResult;
     use quickcheck_macros::quickcheck;
     use std::{panic::RefUnwindSafe, sync::Mutex};
 
     type CounterBox = Box<dyn Fn(u64) -> u64 + RefUnwindSafe + Send + Sync + 'static>;
-    static BKG_THREADS_FUTEX: Lazy<Mutex<ThreadPool<CounterBox, FutexScheduler>>> =
+    static BKG_THREADS_FUTEX: Lazy<Mutex<BasicThreadPool<CounterBox, FutexScheduler>>> =
         Lazy::new(|| {
-            Mutex::new(ThreadPool::start(
+            Mutex::new(BasicThreadPool::start(
                 Box::new(crate::simd::multiversion::multiversion_avx2) as _,
+                FutexScheduler::new,
             ))
         });
 

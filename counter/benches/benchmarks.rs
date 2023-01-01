@@ -179,7 +179,7 @@ fn benchmarks() -> Vec<(&'static str, Benchmark)> {
     #[cfg(target_feature = "avx2")]
     {
         use counter::thread::{
-            pool::{BasicScheduler, ThreadPool},
+            pool::{BasicScheduler, BasicThreadPool},
             sync::FutexScheduler,
         };
         add_benchmarks(
@@ -226,16 +226,20 @@ fn benchmarks() -> Vec<(&'static str, Benchmark)> {
         benchmarks.push((
             "thread_pool",
             Benchmark::Parallel(Box::new(|| {
-                let mut bkg =
-                    ThreadPool::<_, BasicScheduler>::start(counter::simd::narrow::narrow_u8_tuned);
+                let mut bkg = BasicThreadPool::start(
+                    counter::simd::narrow::narrow_u8_tuned,
+                    BasicScheduler::new,
+                );
                 Box::new(move |target| bkg.count(target)) as CounterBox
             }) as _),
         ));
         benchmarks.push((
             "thread_futex",
             Benchmark::Parallel(Box::new(|| {
-                let mut bkg =
-                    ThreadPool::<_, FutexScheduler>::start(counter::simd::narrow::narrow_u8_tuned);
+                let mut bkg = BasicThreadPool::start(
+                    counter::simd::narrow::narrow_u8_tuned,
+                    FutexScheduler::new,
+                );
                 Box::new(move |target| bkg.count(target)) as CounterBox
             }) as _),
         ));
