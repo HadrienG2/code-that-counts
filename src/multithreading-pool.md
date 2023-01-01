@@ -175,20 +175,31 @@ This performance deficiency will be adressed in the next chapter.
 ## Collecting results
 
 After starting jobs, we need to wait for them to finish and collect results.
-This is where a spinlock will come into play, since we cannot reasonably fit
-both our aggregated 64-bit result and a counter of unfinished threads into a
-single machine word, and so cannot update both with a single hardware atomic
-read-modify-write operations. Thus we need locking to provide logical atomicity.
+Again, we'll explore several ways of doing this, so let's express what we need
+as a trait:
 
 ```rust,no_run
-{{#include ../counter/src/thread/pool.rs:Aggregator}}
+{{#include ../counter/src/thread/pool.rs:Reducer}}
 ```
 
-The only interesting things within this code are the atomic memory orderings,
-which are chosen in such as way that any thread which either acquires the
-spinlock or spins waiting for `remaining_tasks` to reach 0 with `Acquire`
-ordering will get a consistent value of `result` at the time where
-`remaining_task` was last decremented.
+To be able simultaneously track the aggregated 64-bit job result and the 32-bit
+counter of threads that still have to provide their contribution, we need
+96 bits of state, which is more state than hardware can update in a single
+atomic read-modify-write transaction (well technically some hardware can do
+128-bit atomics but they are almost twice as slow as their 64-bit counterparts).
+
+To avoid the need for multiple expensive hardware atomic transactions, we
+synchronize writers using a spinlock, as we hinted at earlier.
+
+```rust,no_run
+{{#include ../counter/src/thread/pool.rs:BasicResultReducer}}
+```
+
+Besides the spinlock, the main other interesting thing in this code is the
+choice of atomic memory orderings, which ensure that any thread which either
+acquires the spinlock or spins waiting for `remaining_threads` to reach 0 with
+`Acquire` ordering will get a consistent value of `result` at the time where
+`remaining_threads` reached 0.
 
 
 ## Shared facilities
@@ -202,6 +213,8 @@ transactions.
 ```
 
 This is a bit large, let's go through it step by step.
+
+TODO: Update
 
 The shared state is a combination of the two synchronization primitives that we
 have introduced previously with a sequential counting implementation and
@@ -240,7 +253,7 @@ threads, provide the top-level counting API, and making sure that when the main
 thread exits, it warns worker threads so they exit too.
 
 ```rust,no_run
-{{#include ../counter/src/thread/pool.rs:ThreadPool}}
+{{#include ../counter/src/thread/pool.rs:BasicThreadPool}}
 ```
 
 And with that, we have a full custom parallel counting implementation that we

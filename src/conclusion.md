@@ -9,3 +9,5 @@ TODO: This is most certainly a pointless calculation, but it does provide a nice
       I should definitely also send a copy of this to Paul McKenney with some
       background info on how this is a parallel programming book joke gone too
       far.
+
+      Also, look ma no unsafe !
