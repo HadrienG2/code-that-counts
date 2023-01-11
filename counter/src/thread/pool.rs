@@ -1,3 +1,5 @@
+use std::io::Write;
+
 // ANCHOR: spin_loop
 /// Spin until a condition is validated
 ///
@@ -559,10 +561,14 @@ impl<
 /// Logs to ease debugging
 fn debug_log(is_main: bool, action: &str) {
     if cfg!(debug_assertions) {
-        static MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _lock = MUTEX.lock();
+        let mut stderr = std::io::stderr().lock();
         let header = if is_main { "Main " } else { "" };
-        eprintln!("{header}{:?} is {action}", std::thread::current().id());
+        writeln!(
+            stderr,
+            "{header}{:?} is {action}",
+            std::thread::current().id()
+        )
+        .unwrap();
     }
 }
 // ANCHOR_END: SharedState
