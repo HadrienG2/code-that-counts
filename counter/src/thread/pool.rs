@@ -561,14 +561,8 @@ impl<
 /// Logs to ease debugging
 fn debug_log(is_main: bool, action: &str) {
     if cfg!(debug_assertions) {
-        let mut stderr = std::io::stderr().lock();
         let header = if is_main { "Main " } else { "" };
-        writeln!(
-            stderr,
-            "{header}{:?} is {action}",
-            std::thread::current().id()
-        )
-        .unwrap();
+        println!("{header}{:?} is {action}", std::thread::current().id());
     }
 }
 // ANCHOR_END: SharedState
