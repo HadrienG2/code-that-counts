@@ -1,5 +1,3 @@
-use std::io::Write;
-
 // ANCHOR: spin_loop
 /// Spin until a condition is validated
 ///
@@ -35,7 +33,7 @@ fn spin_loop<const INFINITE: bool, Ready>(
         backoff = (2 * backoff).min(MAX_BACKOFF);
     }
 
-    // Switch to yielding to the OS once it's clear it's gonna take a while to
+    // Switch to yielding to the OS once it's clear it's gonna take a while, to
     // reduce our CPU consumption at the cost of higher wakeup latency
     macro_rules! yield_iter {
         () => {
@@ -343,12 +341,12 @@ impl Reducer for BasicResultReducer {
 
         // Enforce a Release barrier so that threads observing this
         // notification with Acquire ordering also observe the merged results
-        match ordering {
-            Ordering::Relaxed => ordering = Ordering::Release,
-            Ordering::Acquire => ordering = Ordering::AcqRel,
-            Ordering::Release | Ordering::AcqRel | Ordering::SeqCst => {}
+        ordering = match ordering {
+            Ordering::Relaxed => Ordering::Release,
+            Ordering::Acquire => Ordering::AcqRel,
+            Ordering::Release | Ordering::AcqRel | Ordering::SeqCst => ordering,
             _ => unimplemented!(),
-        }
+        };
 
         // Merge our results, expose job results if done
         let mut lock = self.lock();
@@ -371,7 +369,7 @@ impl<'aggregator> ReducerGuard<'aggregator> {
         )
     }
 
-    /// Notify that this thread is done, tell how many threads remain
+    /// Notify that this thread is done, tell if all threads are done
     pub fn notify_done(&mut self, order: atomic::Ordering) -> bool {
         self.fetch_update(
             &self.0.remaining_threads,
@@ -381,13 +379,16 @@ impl<'aggregator> ReducerGuard<'aggregator> {
         ) == 0
     }
 
-    /// Read-Modify_Write operation that is not atomic in hardware, but
+    /// Read-Modify-Write operation that is not atomic in hardware, but
     /// logically atomic if all concurrent writes to the target atomic variable
     /// require exclusive access to the spinlock-protected ReducerGuard
     ///
     /// In debug builds, the `check` sanity check is first performed on the
     /// existing value, then a new value is computed through `change`, inserted
     /// into the target atomic variable, and returned.
+    ///
+    /// Note that this is unlike the fetch_xyz functions of Atomic variables,
+    /// which return the _previous_ value of the variable.
     ///
     fn fetch_update<T: Copy>(
         &mut self,
@@ -562,6 +563,8 @@ impl<
 fn debug_log(is_main: bool, action: &str) {
     if cfg!(debug_assertions) {
         let header = if is_main { "Main " } else { "" };
+        // While using stdout here defies Unix convention, it also ensures that
+        // the test harness can capture the message, unlike unbuffered stderr.
         println!("{header}{:?} is {action}", std::thread::current().id());
     }
 }

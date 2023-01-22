@@ -34,22 +34,19 @@ impl Reducer for std::sync::atomic::AtomicU32 {
 
 /// Behaves like a Reducer, but with a scalable reduction tree implementation
 pub struct ReductionTree<Reducer> {
-    /// Tree nodes in breadth-first order
-    nodes: Vec<PaddedNode<Reducer>>,
+    /// Tree nodes
+    nodes: Vec<CachePadded<ReductionNode<Reducer>>>,
 
     /// Root node index
     root_idx: usize,
 }
-//
-/// Cache-padded ReductionNode
-type PaddedNode<Reducer> = CachePadded<ReductionNode<Reducer>>;
 //
 /// Node of the ReductionTree
 struct ReductionNode<Reducer> {
     /// Reduction node
     reducer: Reducer,
 
-    /// Parent index (root node is its own parent)
+    /// Parent index (root node has Self::INVALID_IDX here)
     parent_idx: usize,
 
     /// Number of children
@@ -166,7 +163,7 @@ impl<R: Default + Reducer<AccumulatorId = ()>> ReductionTree<R> {
         let mut children = Vec::new();
         let mut child_opt = Some(first_child);
         while let Some(child) = child_opt {
-            children.extend(self.add_children(threads, max_arity, child, usize::MAX));
+            children.extend(self.add_children(threads, max_arity, child, Self::INVALID_IDX));
             child_opt = child.next_sibling();
         }
 
@@ -182,7 +179,7 @@ impl<R: Default + Reducer<AccumulatorId = ()>> ReductionTree<R> {
         // If control reached this point, then we truly have multiple CPU-bearing
         // children whose results we want to sum through one or more ReductionNodes.
         // Return a list of ReductionNodes to which children can be attached,
-        // along with a count of how many children they can host.
+        // along with a count of how many children each of them can host.
         let root_idx = self.nodes.len();
         let num_children = u32::try_from(children.len()).unwrap();
         let parent_capacity = self.add_nodes(max_arity, parent_idx, num_children);
@@ -195,7 +192,9 @@ impl<R: Default + Reducer<AccumulatorId = ()>> ReductionTree<R> {
             u32::try_from(children.len()).unwrap()
         );
 
-        // Deduce an iterator of "children slots" with the right multiplicity
+        // From this, we can trivially infer a duplicated list of "children
+        // slots": list of parents where a parent that can accept N children is
+        // duplicated N times.
         let children_slots = parent_capacity
             .into_iter()
             .flat_map(|(parent_idx, capacity)| {
@@ -247,7 +246,7 @@ impl<R: Default + Reducer<AccumulatorId = ()>> ReductionTree<R> {
         parent_idx: usize,
         num_children: u32,
     ) -> impl IntoIterator<Item = (usize, u32)> + Clone {
-        // Create a root node with as many children as possible
+        // Create a root node with as many children as needed and possible
         let first_batch = num_children.min(max_arity);
         let root_idx = self.nodes.len();
         self.nodes.push(CachePadded::new(ReductionNode::new(
@@ -294,7 +293,7 @@ impl<R: Default + Reducer<AccumulatorId = ()>> ReductionTree<R> {
                 debug_assert!(self
                     .nodes
                     .iter()
-                    .skip(root_idx)
+                    .skip(parent_start)
                     .all(|node| node.num_children == max_arity));
             }
 
@@ -307,14 +306,15 @@ impl<R: Default + Reducer<AccumulatorId = ()>> ReductionTree<R> {
                 max_arity,
             )));
 
-            // Creating a subtree replaces an existing child and hosts the newly
-            // allocated child, making room for (max_arity - 2) more children.
+            // Creating a subtree replaces an existing child, which must be
+            // reallocated to it, and it also hosts the newly allocated child.
+            // This makes room for (max_arity - 2) more children.
             let new_children = max_arity - 2;
             if new_children > 0 {
                 // Distribute "holes" among the most recently created tree
                 // nodes, with priority given to newer nodes further away from
                 // the root (we fill the tree top to bottom and left to right)
-                let num_hosts = (self.nodes.len() - root_idx + 1).min(new_children as usize);
+                let num_hosts = (self.nodes.len() - root_idx).min(new_children as usize);
                 let new_children_share = new_children / num_hosts as u32;
                 let extra_new_children = new_children as usize % num_hosts;
                 //
