@@ -119,7 +119,7 @@ impl<R: Default + Reducer<AccumulatorId = ()>> ReductionTree<R> {
 
         // Validate the tree in debug builds
         if cfg!(debug_assertions) {
-            result.validate(topology, max_arity, &threads);
+            result.validate_and_print(topology, max_arity, &threads);
         }
         (result, threads)
     }
@@ -381,7 +381,9 @@ impl<R: Default + Reducer<AccumulatorId = ()>> ReductionTree<R> {
     }
 
     /// Validate that the output tree is consistent with constructor parameters
-    fn validate(
+    /// and print it out to enable manual inspection.
+    // FIXME: This belongs to test code, not the main struct
+    fn validate_and_print(
         &self,
         topology: &hwloc2::Topology,
         max_arity: u32,
@@ -436,6 +438,7 @@ impl<R: Default + Reducer<AccumulatorId = ()>> ReductionTree<R> {
 
         // Traverse the tree from the root, make sure all nodes are reachable,
         // and measure the tree depth along the way.
+        // TODO: Couple this with a check that hwloc topology is honored?
         let mut reached = 0;
         let mut depth = 0;
         let mut next_nodes = vec![root_idx];
