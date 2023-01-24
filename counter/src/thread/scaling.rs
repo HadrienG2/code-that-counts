@@ -439,6 +439,7 @@ impl<R: Default + Reducer<AccumulatorId = ()>> ReductionTree<R> {
         // Traverse the tree from the root, make sure all nodes are reachable,
         // and measure the tree depth along the way.
         // TODO: Couple this with a check that hwloc topology is honored?
+        //       Essentially, the goal is to check that
         let mut reached = 0;
         let mut depth = 0;
         let mut next_nodes = vec![root_idx];
