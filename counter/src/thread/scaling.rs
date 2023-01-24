@@ -48,7 +48,7 @@ struct ReductionNode<Reducer> {
     /// Reduction node
     reducer: Reducer,
 
-    /// Parent index (root node has Self::INVALID_IDX here)
+    /// Parent index
     parent_idx: NullableIdx,
 
     /// Number of children
@@ -60,7 +60,7 @@ impl<R: Default + Reducer<AccumulatorId = ()>> ReductionTree<R> {
     ///
     /// In addition to the tree, a vector of thread metadata is produced. This
     /// assigns a CpuSet to each processing thread for pinning purposes, as well
-    /// as a leaf node index in the `ReductionTree`.
+    /// as an accumulator node inside of the `ReductionTree`.
     ///
     /// The `max_arity` tuning parameters controls the tradeoff between
     /// thread contention (which leads to slower atomic operations) and
@@ -70,7 +70,7 @@ impl<R: Default + Reducer<AccumulatorId = ()>> ReductionTree<R> {
     /// associated with that cache shard will be shared by 28 children.
     ///
     /// As the value gets lower, tree nodes with too many children are split
-    /// into subtrees, so in the example above, a `max_arity` of 2 would produce
+    /// into subtrees, so in the example above, a `max_arity` of 2 could produce
     /// a tree with two first-level nodes with 14 recursive children, each split
     /// into two second-level nodes with 7 children, each split into one
     /// third-level node with 3 children and another with 4 children, and so on.
@@ -84,12 +84,7 @@ impl<R: Default + Reducer<AccumulatorId = ()>> ReductionTree<R> {
             root_idx: NullableIdx::none(),
         };
         let mut threads = Vec::new();
-        let top_children = result.add_children(
-            &mut threads,
-            max_arity,
-            topology.object_at_root(),
-            NullableIdx::none(),
-        );
+        let top_children = result.add_children(&mut threads, max_arity, topology.object_at_root());
 
         // Set up root node
         match top_children[..] {
@@ -143,80 +138,60 @@ impl<R: Default + Reducer<AccumulatorId = ()>> ReductionTree<R> {
     }
 
     /// Translate an hwloc object into nodes or leaves of the reduction tree
+    ///
+    /// Collects thread objects mapping into individual processing threads, and
+    /// returns a list of direct CPU-bearing children (threads or reduction
+    /// tree nodes) which have not been assigned a parent yet.
+    ///
     fn add_children(
         &mut self,
         threads: &mut Vec<ThreadConfig<NullableIdx>>,
         max_arity: u32,
         object: &hwloc2::TopologyObject,
-        parent_idx: NullableIdx,
     ) -> Vec<ReducedChild> {
         debug_assert!(max_arity >= Self::MIN_ARITY);
 
-        // Ignore objects with no CPUs attached early on
+        // Ignore objects with no CPUs attached
         let Some(object_cpuset) = object.cpuset() else { return Vec::new() };
 
-        // Upon reaching a leaf hwloc object, emit a list of leaf threads
+        // Upon reaching a leaf hwloc object, emit a list of leaf CPU threads
         let Some(first_child) = object.first_child() else {
-            return Self::add_threads(threads, object_cpuset, parent_idx);
+            return Self::add_threads(threads, object_cpuset);
         };
 
         // Pass through hwloc objects with only one child, like L1 CPU caches:
         // they are not interesting from a parallel reduction perspective, but
-        // may lead to more interesting children.
+        // will eventually lead to more interesting children
         if object.arity() == 1 {
-            return self.add_children(threads, max_arity, first_child, parent_idx);
+            return self.add_children(threads, max_arity, first_child);
         }
 
         // If we reached this point, then the active hwloc object has multiple
-        // direct children, from the perspective of hwloc at least. Collect
-        // these, binding them to an invalid parent index for now.
+        // direct children from the perspective of hwloc, collect these
         let mut children = Vec::new();
         let mut child_opt = Some(first_child);
         while let Some(child) = child_opt {
-            children.extend(self.add_children(threads, max_arity, child, NullableIdx::none()));
+            children.extend(self.add_children(threads, max_arity, child));
             child_opt = child.next_sibling();
         }
 
         // If there turns out to be only 0 or 1 CPU-bearing children, then we
-        // don't need a root node, attach any child directly to the parent.
+        // don't need a root reduction node, we just bind to the parent
         if children.len() < 2 {
-            for child in &mut children {
-                child.rebind(self, threads, parent_idx);
-            }
             return children;
         }
 
-        // If control reached this point, then we truly have multiple CPU-bearing
-        // children whose results we want to sum through one or more ReductionNodes.
-        // Return a list of ReductionNodes to which children can be attached,
-        // along with a count of how many children each of them can host.
-        let root_idx = self.nodes.len();
+        // If we have multiple CPU-bearing children, we want to aggregate their
+        // results through a tree of ReductionNodes
         let num_children = u32::try_from(children.len()).unwrap();
-        let parent_capacity = self.add_nodes(max_arity, parent_idx, num_children);
-        debug_assert_eq!(
-            parent_capacity
-                .clone()
-                .into_iter()
-                .map(|(_idx, num_children)| num_children)
-                .sum::<u32>(),
-            u32::try_from(children.len()).unwrap()
-        );
+        let (root_idx, children_slots) = self.add_nodes(max_arity, num_children);
 
-        // From this, we can trivially infer a duplicated list of "children
-        // slots": list of parents where a parent that can accept N children is
-        // duplicated N times.
-        let children_slots = parent_capacity
-            .into_iter()
-            .flat_map(|(parent_idx, capacity)| {
-                std::iter::repeat(parent_idx).take(capacity as usize)
-            });
-
-        // Bind our children to these parent slots
+        // Bind our children to nodes of the newly created reduction subtree
         for (child, parent_idx) in children.iter_mut().zip(children_slots) {
-            child.rebind(self, threads, NullableIdx::some(parent_idx));
+            child.set_parent(self, threads, NullableIdx::some(parent_idx));
         }
 
-        // Expose our root node as the child of the caller
+        // Expose the root node as our only direct child
         children.clear();
         children.push(ReducedChild::Node(root_idx));
         children
@@ -228,39 +203,36 @@ impl<R: Default + Reducer<AccumulatorId = ()>> ReductionTree<R> {
     /// children list usable as an `add_children` return value, for the purpose
     /// of later being bound to ReductionNodes.
     ///
-    /// The initial parent node index can be invalid, it will be patched later on.
-    ///
     fn add_threads(
         threads: &mut Vec<ThreadConfig<NullableIdx>>,
         cpuset: hwloc2::CpuSet,
-        parent_idx: NullableIdx,
     ) -> Vec<ReducedChild> {
         let mut children = Vec::with_capacity(usize::try_from(cpuset.weight()).unwrap());
         for cpu in cpuset {
             children.push(ReducedChild::Thread(threads.len()));
-            threads.push(ThreadConfig::new(cpu, parent_idx));
+            threads.push(ThreadConfig::new(cpu));
         }
         return children;
     }
 
-    /// Set up a (sub-)tree of ReductionNodes that can hold a number of children
+    /// Set up a subtree of ReductionNodes to reduce results from N children
     ///
-    /// The initial parent node index can be invalid, it will be patched later on.
-    ///
-    /// Tell which of these nodes can hold children, and how many children each
-    /// of these can hold.
+    /// Return the index of the root of the subtree (which must later be bound
+    /// to a parent node if it is not the root of the whole ReductionTree) and
+    /// a list of parent indices to which children can be bound.
     ///
     fn add_nodes(
         &mut self,
         max_arity: u32,
-        parent_idx: NullableIdx,
         num_children: u32,
-    ) -> impl IntoIterator<Item = (usize, u32)> + Clone {
+    ) -> (usize, impl IntoIterator<Item = usize>) {
+        debug_assert!(max_arity >= Self::MIN_ARITY);
+
         // Create a root node with as many children as needed and possible
         let first_batch = num_children.min(max_arity);
         let root_idx = self.nodes.len();
         self.nodes.push(CachePadded::new(ReductionNode::new(
-            parent_idx,
+            NullableIdx::none(),
             first_batch,
         )));
 
@@ -272,7 +244,7 @@ impl<R: Default + Reducer<AccumulatorId = ()>> ReductionTree<R> {
         let mut parent_idx = parent_start;
 
         // Once all nodes are filled to capacity, we start turning
-        // "scalar" children into subtrees in a breadth-first and
+        // direct children into subtrees in a breadth-first and
         // round-robin fashion:
         //
         // - First we turn the first child of the root into a subtree
@@ -289,6 +261,9 @@ impl<R: Default + Reducer<AccumulatorId = ()>> ReductionTree<R> {
         let mut subtree_capacity = max_arity;
 
         // Allocate remaining children, if any
+        // TODO: To make this method more straightforward, create a state object
+        //       for the iteration, with one method to allocate one extra child
+        //       and another method to collect the final list of children slots.
         for _ in first_batch..num_children {
             // First allocate children among nodes that still have
             // capacity to host more, in a round-robin fashion
@@ -310,7 +285,7 @@ impl<R: Default + Reducer<AccumulatorId = ()>> ReductionTree<R> {
             // Once all tree nodes have the maximal amount of children
             // allowed by arity, it's time to create a new sub-tree. We make it
             // fully filled initially so that we can handle it homogeneously
-            // with respect to other sub-trees affected by this operations.
+            // with respect to other existing subtrees affected by this event.
             self.nodes.push(CachePadded::new(ReductionNode::new(
                 NullableIdx::some(subtree_parent_idx),
                 max_arity,
@@ -333,7 +308,7 @@ impl<R: Default + Reducer<AccumulatorId = ()>> ReductionTree<R> {
                 }
 
                 // Update iteration state so that next time we will add
-                // children to the earliest node with least children.
+                // children to the earliest added node with least children.
                 let parent_end = self.nodes.len();
                 parent_start = parent_end - num_hosts;
                 if extra_new_children > 0 {
@@ -368,9 +343,9 @@ impl<R: Default + Reducer<AccumulatorId = ()>> ReductionTree<R> {
             node.reset();
         }
 
-        // Now it's time to determine where children can bind in that tree.
+        // Now it's time to determine where children will bind in that tree.
         let mut parent_capacity = Vec::with_capacity(self.nodes.len() - subtree_parent_start);
-
+        //
         // Below subtree_parent_start, all nodes are full of subtree
         // children, with no room for threads & friends, so we ignore those nodes.
         for parent_idx in subtree_parent_start..subtree_parent_end {
@@ -390,7 +365,19 @@ impl<R: Default + Reducer<AccumulatorId = ()>> ReductionTree<R> {
             let capacity = self.nodes[parent_idx].num_children;
             parent_capacity.push((parent_idx, capacity));
         }
-        parent_capacity
+        //
+        // Translate these N-ary binding slots into unary ones for caller convenience
+        let children_slots = parent_capacity
+            .into_iter()
+            .flat_map(|(parent_idx, capacity)| {
+                std::iter::repeat(parent_idx).take(capacity as usize)
+            });
+        debug_assert_eq!(
+            u32::try_from(children_slots.clone().count()).unwrap(),
+            num_children
+        );
+
+        (root_idx, children_slots)
     }
 
     /// Validate that the output tree is consistent with constructor parameters
@@ -403,6 +390,7 @@ impl<R: Default + Reducer<AccumulatorId = ()>> ReductionTree<R> {
         let mut children = vec![vec![]; self.nodes.len()];
         let mut full_cpuset = hwloc2::CpuSet::new();
 
+        // Check that ThreadConfigs follow expectations
         for (idx, thread) in threads.into_iter().enumerate() {
             // Check that each thread targets a single, unique CPU
             assert_eq!(thread.cpuset.weight(), 1);
@@ -424,7 +412,7 @@ impl<R: Default + Reducer<AccumulatorId = ()>> ReductionTree<R> {
 
         // Check that ReductionNodes follow expectations
         for (idx, node) in self.nodes.iter().enumerate() {
-            // Inner Reducer has been reset properly
+            // Check that inner Reducer has been reset, hopefully correctly
             assert!(node.has_remaining_threads());
 
             // Check that each node reduces into a valid target
@@ -441,12 +429,13 @@ impl<R: Default + Reducer<AccumulatorId = ()>> ReductionTree<R> {
             assert!(node.num_children <= max_arity);
         }
 
-        // Compare node child count to actual number of attached children
+        // Compare node child counts to actual number of attached children
         for (node, node_children) in self.nodes.iter().zip(children.iter()) {
             assert_eq!(node.num_children, node_children.len() as u32);
         }
 
-        // Traverse the tree from the root, make sure all nodes are reachable
+        // Traverse the tree from the root, make sure all nodes are reachable,
+        // and measure the tree depth along the way.
         let mut reached = 0;
         let mut depth = 0;
         let mut next_nodes = vec![root_idx];
@@ -627,7 +616,7 @@ enum ReducedChild {
 //
 impl ReducedChild {
     /// Rebind this child to a different parent node
-    fn rebind<R>(
+    fn set_parent<R>(
         &self,
         tree: &mut ReductionTree<R>,
         threads: &mut Vec<ThreadConfig<NullableIdx>>,
@@ -678,12 +667,12 @@ pub struct ThreadConfig<AccumulatorId> {
     accumulator_id: AccumulatorId,
 }
 //
-impl<AccumulatorId> ThreadConfig<AccumulatorId> {
-    /// Set up a thread config for a certain CPU and accumulator ID
-    pub fn new(cpu: u32, accumulator_id: AccumulatorId) -> Self {
+impl<AccumulatorId: Default> ThreadConfig<AccumulatorId> {
+    /// Set up a thread config for a certain CPU index
+    pub fn new(cpu: u32) -> Self {
         Self {
             cpuset: hwloc2::CpuSet::from(cpu),
-            accumulator_id,
+            accumulator_id: AccumulatorId::default(),
         }
     }
 
