@@ -126,12 +126,12 @@ impl<R: Default + Reducer<AccumulatorId = ()>> ReductionTree<R> {
 
     /// Construct a reduction tree that follows the same structure as this one
     /// but uses a different Reducer, with freshly reset nodes
-    pub fn rebind<R2: Default + Reducer>(&self) -> ReductionTree<R2> {
+    pub fn mimick<R2: Default + Reducer>(&self) -> ReductionTree<R2> {
         ReductionTree {
             nodes: self
                 .nodes
                 .iter()
-                .map(|node| CachePadded::new(node.rebind::<R2>()))
+                .map(|node| CachePadded::new(node.mimick::<R2>()))
                 .collect(),
             root_idx: self.root_idx,
         }
@@ -188,7 +188,7 @@ impl<R: Default + Reducer<AccumulatorId = ()>> ReductionTree<R> {
 
         // Bind our children to nodes of the newly created reduction subtree
         for (child, parent_idx) in children.iter_mut().zip(children_slots) {
-            child.set_parent(self, threads, NullableIdx::some(parent_idx));
+            child.set_parent(self, threads, parent_idx);
         }
 
         // Expose the root node as our only direct child
@@ -597,7 +597,7 @@ impl<R: Default + Reducer<AccumulatorId = ()>> ReductionNode<R> {
     }
 
     /// Make a freshly reset copy of this node with the reducer type changed
-    fn rebind<R2: Default + Reducer>(&self) -> ReductionNode<R2> {
+    fn mimick<R2: Default + Reducer>(&self) -> ReductionNode<R2> {
         let reducer = R2::default();
         reducer.reset(self.num_children);
         ReductionNode {
@@ -619,19 +619,19 @@ enum ReducedChild {
 }
 //
 impl ReducedChild {
-    /// Rebind this child to a different parent node
+    /// Change the parent of this child
     fn set_parent<R>(
         &self,
         tree: &mut ReductionTree<R>,
         threads: &mut Vec<ThreadConfig<NullableIdx>>,
-        parent_idx: NullableIdx,
+        parent_idx: usize,
     ) {
         match self {
             Self::Thread(idx) => {
-                threads[*idx].accumulator_id = parent_idx;
+                threads[*idx].accumulator_id = NullableIdx::some(parent_idx);
             }
             Self::Node(idx) => {
-                tree.nodes[*idx].parent_idx = parent_idx;
+                tree.nodes[*idx].parent_idx = NullableIdx::some(parent_idx);
             }
         }
     }
@@ -680,20 +680,20 @@ impl<AccumulatorId: Default> ThreadConfig<AccumulatorId> {
         }
     }
 
-    /// Perform some operation on the inner accumulator ID
-    pub fn map_id<NewId>(self, new_id: impl FnOnce(AccumulatorId) -> NewId) -> ThreadConfig<NewId> {
-        ThreadConfig {
-            cpuset: self.cpuset,
-            accumulator_id: new_id(self.accumulator_id),
-        }
-    }
-
     /// Bind the active thread to this CPU, get the accumulator ID
     pub fn bind_this_thread(self, topology: &mut hwloc2::Topology) -> AccumulatorId {
         topology
             .set_cpubind(self.cpuset, hwloc2::CpuBindFlags::CPUBIND_THREAD)
             .unwrap();
         self.accumulator_id
+    }
+
+    /// Perform some operation on the inner accumulator ID
+    fn map_id<NewId>(self, new_id: impl FnOnce(AccumulatorId) -> NewId) -> ThreadConfig<NewId> {
+        ThreadConfig {
+            cpuset: self.cpuset,
+            accumulator_id: new_id(self.accumulator_id),
+        }
     }
 }
 
