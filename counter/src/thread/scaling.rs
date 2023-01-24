@@ -1,3 +1,5 @@
+use std::num::NonZeroUsize;
+
 use super::pool::Reducer;
 use crossbeam_utils::CachePadded;
 
@@ -38,7 +40,7 @@ pub struct ReductionTree<Reducer> {
     nodes: Vec<CachePadded<ReductionNode<Reducer>>>,
 
     /// Root node index
-    root_idx: usize,
+    root_idx: NullableIdx,
 }
 //
 /// Node of the ReductionTree
@@ -47,7 +49,7 @@ struct ReductionNode<Reducer> {
     reducer: Reducer,
 
     /// Parent index (root node has Self::INVALID_IDX here)
-    parent_idx: usize,
+    parent_idx: NullableIdx,
 
     /// Number of children
     num_children: u32,
@@ -79,20 +81,20 @@ impl<R: Default + Reducer<AccumulatorId = ()>> ReductionTree<R> {
         // Fill the tree
         let mut result = Self {
             nodes: Vec::new(),
-            root_idx: Self::INVALID_IDX,
+            root_idx: NullableIdx::none(),
         };
         let mut threads = Vec::new();
         let top_children = result.add_children(
             &mut threads,
             max_arity,
             topology.object_at_root(),
-            Self::INVALID_IDX,
+            NullableIdx::none(),
         );
 
         // Set up root node
         match top_children[..] {
             // Normal case where a single root node is returned
-            [ReducedChild::Node(root_idx)] => result.root_idx = root_idx,
+            [ReducedChild::Node(root_idx)] => result.root_idx = NullableIdx::some(root_idx),
 
             // Single-threaded edge case where no root node has been created
             // because each recursive call to result.fill() deferred root node
@@ -100,10 +102,10 @@ impl<R: Default + Reducer<AccumulatorId = ()>> ReductionTree<R> {
             [ReducedChild::Thread(0)] => {
                 assert_eq!(result.num_nodes(), 0);
                 assert_eq!(threads.len(), 1);
-                result.root_idx = 0;
+                result.root_idx = NullableIdx::some(0);
                 result
                     .nodes
-                    .push(CachePadded::new(ReductionNode::new(Self::INVALID_IDX, 1)));
+                    .push(CachePadded::new(ReductionNode::new(NullableIdx::none(), 1)));
                 result.root().reducer.reset(1);
             }
 
@@ -111,6 +113,12 @@ impl<R: Default + Reducer<AccumulatorId = ()>> ReductionTree<R> {
             // hwloc would stuff all CPUs in the root node without a hierarchy
             _ => unreachable!(),
         }
+
+        // At this point, all threads should have a valid parent index
+        let threads = threads
+            .into_iter()
+            .map(|t| t.map_id(|id| id.value().unwrap()))
+            .collect();
 
         // Validate the tree in debug builds
         if cfg!(debug_assertions) {
@@ -135,10 +143,10 @@ impl<R: Default + Reducer<AccumulatorId = ()>> ReductionTree<R> {
     /// Translate an hwloc object into nodes or leaves of the reduction tree
     fn add_children(
         &mut self,
-        threads: &mut Vec<ThreadConfig<usize>>,
+        threads: &mut Vec<ThreadConfig<NullableIdx>>,
         max_arity: u32,
         object: &hwloc2::TopologyObject,
-        parent_idx: usize,
+        parent_idx: NullableIdx,
     ) -> Vec<ReducedChild> {
         debug_assert!(max_arity >= Self::MIN_ARITY);
 
@@ -163,7 +171,7 @@ impl<R: Default + Reducer<AccumulatorId = ()>> ReductionTree<R> {
         let mut children = Vec::new();
         let mut child_opt = Some(first_child);
         while let Some(child) = child_opt {
-            children.extend(self.add_children(threads, max_arity, child, Self::INVALID_IDX));
+            children.extend(self.add_children(threads, max_arity, child, NullableIdx::none()));
             child_opt = child.next_sibling();
         }
 
@@ -203,7 +211,7 @@ impl<R: Default + Reducer<AccumulatorId = ()>> ReductionTree<R> {
 
         // Bind our children to these parent slots
         for (child, parent_idx) in children.iter_mut().zip(children_slots) {
-            child.rebind(self, threads, parent_idx);
+            child.rebind(self, threads, NullableIdx::some(parent_idx));
         }
 
         // Expose our root node as the child of the caller
@@ -221,9 +229,9 @@ impl<R: Default + Reducer<AccumulatorId = ()>> ReductionTree<R> {
     /// The initial parent node index can be invalid, it will be patched later on.
     ///
     fn add_threads(
-        threads: &mut Vec<ThreadConfig<usize>>,
+        threads: &mut Vec<ThreadConfig<NullableIdx>>,
         cpuset: hwloc2::CpuSet,
-        parent_idx: usize,
+        parent_idx: NullableIdx,
     ) -> Vec<ReducedChild> {
         let mut children = Vec::with_capacity(usize::try_from(cpuset.weight()).unwrap());
         for cpu in cpuset {
@@ -243,7 +251,7 @@ impl<R: Default + Reducer<AccumulatorId = ()>> ReductionTree<R> {
     fn add_nodes(
         &mut self,
         max_arity: u32,
-        parent_idx: usize,
+        parent_idx: NullableIdx,
         num_children: u32,
     ) -> impl IntoIterator<Item = (usize, u32)> + Clone {
         // Create a root node with as many children as needed and possible
@@ -302,7 +310,7 @@ impl<R: Default + Reducer<AccumulatorId = ()>> ReductionTree<R> {
             // fully filled initially so that we can handle it homogeneously
             // with respect to other sub-trees affected by this operations.
             self.nodes.push(CachePadded::new(ReductionNode::new(
-                subtree_parent_idx,
+                NullableIdx::some(subtree_parent_idx),
                 max_arity,
             )));
 
@@ -414,6 +422,7 @@ impl<R: Default + Reducer<AccumulatorId = ()>> ReductionTree<R> {
 
         // Check that a root node is present
         assert_ne!(self.nodes.len(), 0);
+        let root_idx = self.root_idx.value().unwrap();
 
         // Check that ReductionNodes follow expectations
         for (idx, node) in self.nodes.iter().enumerate() {
@@ -421,11 +430,12 @@ impl<R: Default + Reducer<AccumulatorId = ()>> ReductionTree<R> {
             assert!(node.has_remaining_threads());
 
             // Check that each node reduces into a valid target
-            if idx == self.root_idx {
-                assert!(node.parent_idx == Self::INVALID_IDX);
+            if idx == root_idx {
+                assert!(node.parent_idx == NullableIdx::none());
             } else {
-                assert!(node.parent_idx < self.nodes.len());
-                children[node.parent_idx].push(ReducedChild::Node(idx));
+                let parent_idx = node.parent_idx.value().unwrap();
+                assert!(parent_idx < self.nodes.len());
+                children[parent_idx].push(ReducedChild::Node(idx));
             }
 
             // Check observed arities
@@ -441,7 +451,7 @@ impl<R: Default + Reducer<AccumulatorId = ()>> ReductionTree<R> {
         // Traverse the tree from the root, make sure all nodes are reachable
         let mut reached = 0;
         let mut depth = 0;
-        let mut next_nodes = vec![self.root_idx];
+        let mut next_nodes = vec![root_idx];
         while !next_nodes.is_empty() {
             depth += 1;
             for next_node in std::mem::take(&mut next_nodes) {
@@ -499,7 +509,7 @@ impl<R: Default + Reducer<AccumulatorId = ()>> ReductionTree<R> {
                 );
             }
         }
-        print_tree(&mut lines, &children, self.root_idx, 0);
+        print_tree(&mut lines, &children, root_idx, 0);
         for line in lines {
             eprintln!("{line}");
         }
@@ -508,12 +518,9 @@ impl<R: Default + Reducer<AccumulatorId = ()>> ReductionTree<R> {
     /// Minimum tree arity needed for reduction to be possible
     const MIN_ARITY: u32 = 2;
 
-    /// Invalid node index, to be patched later on, or kept for the root node
-    const INVALID_IDX: usize = usize::MAX;
-
     /// Shared access to the root node
     fn root(&self) -> &ReductionNode<R> {
-        &self.nodes[self.root_idx]
+        &self.nodes[self.root_idx.value().unwrap()]
     }
 
     /// Current number of allocated nodes
@@ -553,10 +560,10 @@ impl<R: Default + Reducer<AccumulatorId = ()>> Reducer for ReductionTree<R> {
         let node_result = node.thread_done(result, ordering)?;
 
         // We're done with this node. Was it the root node?
-        if node_idx != self.root_idx {
+        if node_idx != self.root_idx.value().unwrap() {
             // If not, reset this node and propagate its results to the parent
             node.reset();
-            self.thread_done(node_result, ordering, node.parent_idx)
+            self.thread_done(node_result, ordering, node.parent_idx.value().unwrap())
         } else {
             // Otherwise, the full reduction is done
             Some(node_result)
@@ -566,7 +573,7 @@ impl<R: Default + Reducer<AccumulatorId = ()>> Reducer for ReductionTree<R> {
 //
 impl<R: Default + Reducer<AccumulatorId = ()>> ReductionNode<R> {
     /// Create a new node
-    fn new(parent_idx: usize, num_children: u32) -> Self {
+    fn new(parent_idx: NullableIdx, num_children: u32) -> Self {
         Self {
             reducer: R::default(),
             parent_idx,
@@ -625,8 +632,8 @@ impl ReducedChild {
     fn rebind<R>(
         &self,
         tree: &mut ReductionTree<R>,
-        threads: &mut Vec<ThreadConfig<usize>>,
-        parent_idx: usize,
+        threads: &mut Vec<ThreadConfig<NullableIdx>>,
+        parent_idx: NullableIdx,
     ) {
         match self {
             Self::Thread(idx) => {
@@ -636,6 +643,30 @@ impl ReducedChild {
                 tree.nodes[*idx].parent_idx = parent_idx;
             }
         }
+    }
+}
+
+/// ReductionNode index with a null state
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+struct NullableIdx(Option<NonZeroUsize>);
+//
+impl NullableIdx {
+    /// Non-null state
+    fn some(x: usize) -> Self {
+        Self(NonZeroUsize::new(
+            x.checked_add(1)
+                .expect("usize::MAX is not a supported index"),
+        ))
+    }
+
+    /// Null state
+    fn none() -> Self {
+        Self(None)
+    }
+
+    /// Check payload
+    fn value(&self) -> Option<usize> {
+        self.0.map(|x| usize::from(x) - 1)
     }
 }
 
@@ -655,6 +686,14 @@ impl<AccumulatorId> ThreadConfig<AccumulatorId> {
         Self {
             cpuset: hwloc2::CpuSet::from(cpu),
             accumulator_id,
+        }
+    }
+
+    /// Perform some operation on the inner accumulator ID
+    pub fn map_id<NewId>(self, new_id: impl FnOnce(AccumulatorId) -> NewId) -> ThreadConfig<NewId> {
+        ThreadConfig {
+            cpuset: self.cpuset,
+            accumulator_id: new_id(self.accumulator_id),
         }
     }
 
