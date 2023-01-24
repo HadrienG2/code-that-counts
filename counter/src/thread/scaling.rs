@@ -102,15 +102,17 @@ impl<R: Default + Reducer<AccumulatorId = ()>> ReductionTree<R> {
             [ReducedChild::Thread(0)] => {
                 assert_eq!(result.num_nodes(), 0);
                 assert_eq!(threads.len(), 1);
-                result.root_idx = NullableIdx::some(0);
                 result
                     .nodes
                     .push(CachePadded::new(ReductionNode::new(NullableIdx::none(), 1)));
+                result.root_idx = NullableIdx::some(0);
                 result.root().reducer.reset(1);
             }
 
             // Returning multiple children cannot happen AFAIK since it means
-            // hwloc would stuff all CPUs in the root node without a hierarchy
+            // hwloc would stuff all CPUs in the root node without any hierarchy.
+            // And returning zero children should not happen because since we
+            // are executing code, at least one CPU should be present ;)
             _ => unreachable!(),
         }
 
@@ -316,10 +318,10 @@ impl<R: Default + Reducer<AccumulatorId = ()>> ReductionTree<R> {
 
             // Creating a subtree replaces an existing child, which must be
             // reallocated to it, and it also hosts the newly allocated child.
-            // This makes room for (max_arity - 2) more children.
+            // This leaves extra room for (max_arity - 2) more children.
             let new_children = max_arity - 2;
             if new_children > 0 {
-                // Distribute "holes" among the most recently created tree
+                // Distribute those "holes" among the most recently created tree
                 // nodes, with priority given to newer nodes further away from
                 // the root (we fill the tree top to bottom and left to right)
                 let num_hosts = (self.nodes.len() - root_idx).min(new_children as usize);
@@ -327,10 +329,7 @@ impl<R: Default + Reducer<AccumulatorId = ()>> ReductionTree<R> {
                 let extra_new_children = new_children as usize % num_hosts;
                 //
                 for (rev_idx, node) in self.nodes.iter_mut().rev().take(num_hosts).enumerate() {
-                    node.num_children -= new_children_share;
-                    if rev_idx < extra_new_children {
-                        node.num_children -= 1;
-                    }
+                    node.num_children -= new_children_share + (rev_idx < extra_new_children) as u32;
                 }
 
                 // Update iteration state so that next time we will add
@@ -376,12 +375,11 @@ impl<R: Default + Reducer<AccumulatorId = ()>> ReductionTree<R> {
         // children, with no room for threads & friends, so we ignore those nodes.
         for parent_idx in subtree_parent_start..subtree_parent_end {
             // Between subtree_parent_start and subtree_parent_end, we were in
-            // the process of turning children into subtrees but not done yet.
+            // the process of turning children into subtrees but not done yet,
+            // so we must discriminate direct chidren from subtrees.
             let num_children = self.nodes[parent_idx].num_children;
-            let mut num_subtrees = max_arity - subtree_capacity;
-            if parent_idx < subtree_parent_idx {
-                num_subtrees += 1;
-            }
+            let num_subtrees =
+                max_arity - subtree_capacity + (parent_idx < subtree_parent_idx) as u32;
             debug_assert!(num_children >= num_subtrees);
             let capacity = num_children - num_subtrees;
             parent_capacity.push((parent_idx, capacity));
