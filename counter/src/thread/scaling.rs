@@ -498,7 +498,7 @@ impl<R: Default + Reducer<AccumulatorId = ()>> ReductionTree<R> {
         }
         print_tree(&mut lines, &children, root_idx, 0);
         for line in lines {
-            eprintln!("{line}");
+            println!("{line}");
         }
     }
 
@@ -711,7 +711,7 @@ mod tests {
     fn aggregator_tree() {
         let topology = Topology::new().unwrap();
         for max_arity in 2..=(std::thread::available_parallelism()
-            .map(|nzu| usize::from(nzu))
+            .map(usize::from)
             .unwrap_or(2) as u32
             + 1)
         {
