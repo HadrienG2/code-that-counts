@@ -76,7 +76,8 @@ jobs:
 
       - name: Check format
         uses: actions-rust-lang/rustfmt@v1
-        manifest-path: ./counter
+        with:
+          manifest-path: ./counter
 
       - name: Type-check the program
         run: cargo check
