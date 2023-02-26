@@ -50,6 +50,10 @@ jobs:
 
     runs-on: ubuntu-latest
 
+    defaults:
+      run:
+        working-directory: ./counter
+
     steps:
       - name: Checkout sources
         uses: actions/checkout@v3
@@ -72,6 +76,7 @@ jobs:
 
       - name: Check format
         uses: actions-rust-lang/rustfmt@v1
+        working-directory: ./counter
 
       - name: Type-check the program
         run: cargo check
@@ -104,6 +109,10 @@ jobs:
     env:
       RUSTFLAGS: ${{ matrix.rustflags }}
 
+    defaults:
+      run:
+        working-directory: ./counter
+
     steps:
       - name: Checkout sources
         uses: actions/checkout@v3
@@ -112,9 +121,6 @@ jobs:
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: ${{ matrix.rust }}
-
-      - name: Go to code directory
-        run: cd counter
 
       - name: Run tests
         run: cargo test
@@ -169,6 +175,10 @@ jobs:
     env:
       RUSTFLAGS: ${{ matrix.rustflags }}
 
+    defaults:
+      run:
+        working-directory: ./counter
+
     steps:
       - name: Checkout sources
         uses: actions/checkout@v3
@@ -177,9 +187,6 @@ jobs:
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: ${{ matrix.rust }}
-
-      - name: Go to code directory
-        run: cd counter
 
       - name: Run tests
         run: cargo test
