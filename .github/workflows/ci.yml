@@ -140,8 +140,8 @@ jobs:
 
   deploy-book:
     # Don't run on a schedule, book doesn't change on its own.
-    # Don't run on pull request events, they don't have permission to push
-    if: github.event_name == 'push'
+    # Don't run on pull request events, they don't have permission to deploy
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
 
     runs-on: ubuntu-latest
 
