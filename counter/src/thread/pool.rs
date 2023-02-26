@@ -298,7 +298,7 @@ impl BasicResultReducer {
 
         loop {
             // Try to opportunistically acquire the lock
-            if self.spin_lock.swap(true, Ordering::Acquire) == false {
+            if !self.spin_lock.swap(true, Ordering::Acquire) {
                 return ReducerGuard(self);
             }
 
@@ -415,7 +415,7 @@ impl<'aggregator> ReducerGuard<'aggregator> {
             Ordering::Acquire => [Ordering::Acquire, Ordering::Relaxed],
             Ordering::Release => [Ordering::Relaxed, Ordering::Release],
             Ordering::AcqRel => [Ordering::Acquire, Ordering::Release],
-            Ordering::SeqCst | _ => unimplemented!(),
+            _ => unimplemented!(),
         }
     }
 }
@@ -597,7 +597,7 @@ impl<
 
         let num_threads = u32::try_from(
             std::thread::available_parallelism()
-                .map(|nzu| usize::from(nzu))
+                .map(usize::from)
                 .unwrap_or(2),
         )
         .expect("Number of threads must fit on 32 bits");

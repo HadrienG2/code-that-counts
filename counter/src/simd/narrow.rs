@@ -111,7 +111,7 @@ pub fn generic_narrow_simple<
                  scalar_accumulators: &mut [u64; ILP_WIDTH]| {
         for (scalar, simd) in scalar_accumulators
             .iter_mut()
-            .zip(simd_accumulators.into_iter())
+            .zip(simd_accumulators.iter_mut())
         {
             *scalar += simd.reduce();
         }

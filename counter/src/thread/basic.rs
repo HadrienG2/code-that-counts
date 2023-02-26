@@ -1,7 +1,7 @@
 // ANCHOR: thread_basic
 pub fn thread_basic(target: u64, sequential: impl Fn(u64) -> u64 + Sync) -> u64 {
     let num_threads = std::thread::available_parallelism()
-        .map(|nzu| usize::from(nzu))
+        .map(usize::from)
         .unwrap_or(2);
 
     let base_share = target / num_threads as u64;

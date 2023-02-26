@@ -30,14 +30,21 @@ jobs:
       - name: Checkout sources
         uses: actions/checkout@v3
 
-      - name: Set up stable toolchain
-        uses: actions-rust-lang/setup-rust-toolchain@v1
-
       - name: Install mdbook
-        run: cargo install mdbook
+        run: |
+          mkdir bin
+          curl -sSL https://github.com/rust-lang/mdBook/releases/download/v0.4.27/mdbook-v0.4.27-x86_64-unknown-linux-gnu.tar.gz | tar -xz --directory=bin
+          echo "$(pwd)/bin" >> ${GITHUB_PATH}
 
       - name: Render the book
         run: mkdir public && mdbook build -d public
+
+      - name: Upload the book
+        uses: actions/upload-artifact@v3
+        with:
+          name: book
+          path: ./public
+          if-no-files-found: error
 
   # Auto-format, clippy and rustc lints do not depend on the operating system
   # and only need to be tested on the latest supported release of each CI run.
@@ -50,9 +57,18 @@ jobs:
 
     runs-on: ubuntu-latest
 
+    defaults:
+      run:
+        working-directory: ./counter
+
     steps:
       - name: Checkout sources
         uses: actions/checkout@v3
+
+      - uses: awalsh128/cache-apt-pkgs-action@latest
+        with:
+          version: 1.0
+          packages: libhwloc-dev
 
       - name: Set up stable toolchain
         if: github.event_name != 'schedule'
@@ -67,8 +83,8 @@ jobs:
           toolchain: nightly
           components: rustfmt,clippy
 
-      - name: Check format
-        uses: actions-rust-lang/rustfmt@v1
+      - name: Check code formatting
+        run: cargo fmt -- --check
 
       - name: Type-check the program
         run: cargo check
@@ -85,25 +101,30 @@ jobs:
 
     strategy:
       matrix:
-        os:
-          - ubuntu-latest
-          - windows-latest
-          - macos-latest
-        rustflags:
-          - "-D warnings"
-          - "-D warnings -C target-cpu = native"
+        target-flags:
+          - ""
+          - "-C target-cpu=native"
         rust:
           - stable
-          - 1.60.0  # Minimum supported Rust version
+          - 1.65.0  # Minimum supported Rust version
 
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-latest
 
     env:
-      RUSTFLAGS: ${{ matrix.rustflags }}
+      RUSTFLAGS: "-D warnings ${{ matrix.target-flags }}"
+
+    defaults:
+      run:
+        working-directory: ./counter
 
     steps:
       - name: Checkout sources
         uses: actions/checkout@v3
+
+      - uses: awalsh128/cache-apt-pkgs-action@latest
+        with:
+          version: 1.0
+          packages: libhwloc-dev
 
       - name: Set up toolchain
         uses: actions-rust-lang/setup-rust-toolchain@v1
@@ -116,11 +137,11 @@ jobs:
       - name: Check that benchmarks build
         run: cargo build --benches
 
+
   deploy-book:
     # Don't run on a schedule, book doesn't change on its own.
-    # Only run on "pull_request" event for external PRs. This is to avoid
-    # duplicate builds for PRs created from internal branches.
-    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name != github.repository
+    # Don't run on pull request events, they don't have permission to deploy
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
 
     runs-on: ubuntu-latest
 
@@ -130,11 +151,30 @@ jobs:
 
     needs: ["render-book", "lints", "test-contrib"]
 
+    # Grant GITHUB_TOKEN the permissions required to make a Pages deployment
+    permissions:
+      pages: write      # to deploy to Pages
+      id-token: write   # to verify the deployment originates from an appropriate source
+
     steps:
-      - name: Upload artifact
+      - name: Download the book
+        uses: actions/download-artifact@v3
+        with:
+          name: book
+          path: .
+
+      - name: Configure github pages
+        uses: actions/configure-pages@v1
+
+      - name: Upload book to github pages
         uses: actions/upload-pages-artifact@v1
         with:
-          path: ./public
+          path: .
+
+      - name: Deploy github pages
+        id: deployment
+        uses: actions/deploy-pages@v1
+
 
   # Check compatibility with newer Rust/deps versions (scheduled CI)
   #
@@ -146,26 +186,31 @@ jobs:
 
     strategy:
       matrix:
-        os:
-          - ubuntu-latest
-          - windows-latest
-          - macos-latest
         rustflags:
           - "-D warnings"
-          - "-D warnings -C target-cpu = native"
+          - "-D warnings -C target-cpu=native"
         rust:
           - beta
           - nightly
-          - 1.60.0  # Minimum supported Rust version (can be broken by deps)
+          - 1.65.0  # Minimum supported Rust version (can be broken by deps)
 
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-latest
 
     env:
       RUSTFLAGS: ${{ matrix.rustflags }}
 
+    defaults:
+      run:
+        working-directory: ./counter
+
     steps:
       - name: Checkout sources
         uses: actions/checkout@v3
+
+      - uses: awalsh128/cache-apt-pkgs-action@latest
+        with:
+          version: 1.0
+          packages: libhwloc-dev
 
       - name: Set up toolchain
         uses: actions-rust-lang/setup-rust-toolchain@v1
