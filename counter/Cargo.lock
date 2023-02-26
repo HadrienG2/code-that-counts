@@ -28,9 +28,9 @@ dependencies = [
 
 [[package]]
 name = "atomic-wait"
-version = "1.0.1"
+version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a95efd5abf695e62f5409ff403632a76103d66e04ea60d32b8e512c1598c80d5"
+checksum = "a55b94919229f2c42292fd71ffa4b75e83193bffdd77b1e858cd55fd2d0b0ea8"
 dependencies = [
  "libc",
  "windows-sys",
