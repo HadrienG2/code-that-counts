@@ -30,11 +30,11 @@ jobs:
       - name: Checkout sources
         uses: actions/checkout@v3
 
-      - name: Set up stable toolchain
-        uses: actions-rust-lang/setup-rust-toolchain@v1
-
       - name: Install mdbook
-        run: cargo install mdbook
+        run: |
+          mkdir bin
+          curl -sSL https://github.com/rust-lang/mdBook/releases/download/v0.4.27/mdbook-v0.4.27-x86_64-unknown-linux-gnu.tar.gz | tar -xz --directory=bin
+          echo "$(pwd)/bin" >> ${GITHUB_PATH}
 
       - name: Render the book
         run: mkdir public && mdbook build -d public
@@ -66,6 +66,9 @@ jobs:
         with:
           toolchain: nightly
           components: rustfmt,clippy
+
+      - name: Go to code directory
+        run: cd counter
 
       - name: Check format
         uses: actions-rust-lang/rustfmt@v1
@@ -109,6 +112,9 @@ jobs:
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: ${{ matrix.rust }}
+
+      - name: Go to code directory
+        run: cd counter
 
       - name: Run tests
         run: cargo test
@@ -171,6 +177,9 @@ jobs:
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: ${{ matrix.rust }}
+
+      - name: Go to code directory
+        run: cd counter
 
       - name: Run tests
         run: cargo test
