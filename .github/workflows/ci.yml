@@ -101,9 +101,9 @@ jobs:
 
     strategy:
       matrix:
-        rustflags:
-          - "-D warnings"
-          - "-D warnings -C target-cpu=native"
+        target-flags:
+          - ""
+          - "-C target-cpu=native"
         rust:
           - stable
           - 1.65.0  # Minimum supported Rust version
@@ -111,7 +111,7 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-      RUSTFLAGS: ${{ matrix.rustflags }}
+      RUSTFLAGS: "-D warnings ${{ matrix.target-flags }}"
 
     defaults:
       run:
@@ -137,6 +137,7 @@ jobs:
       - name: Check that benchmarks build
         run: cargo build --benches
 
+
   deploy-book:
     # Don't run on a schedule, book doesn't change on its own.
     # Don't run on pull request events, they don't have permission to push
@@ -149,6 +150,11 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
 
     needs: ["render-book", "lints", "test-contrib"]
+
+    # Grant GITHUB_TOKEN the permissions required to make a Pages deployment
+    permissions:
+      pages: write      # to deploy to Pages
+      id-token: write   # to verify the deployment originates from an appropriate source
 
     steps:
       - name: Download the book
@@ -168,6 +174,7 @@ jobs:
       - name: Deploy github pages
         id: deployment
         uses: actions/deploy-pages@v1
+
 
   # Check compatibility with newer Rust/deps versions (scheduled CI)
   #
