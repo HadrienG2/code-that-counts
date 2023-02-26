@@ -76,16 +76,15 @@ jobs:
           toolchain: nightly
           components: rustfmt,clippy
 
+      - name: Check code formatting
+        uses: actions-rust-lang/rustfmt@v1
+        run: cargo fmt -- --check
+
       - name: Type-check the program
         run: cargo check
 
       - name: Check clippy lints
         run: cargo clippy -- -D warnings
-
-      - name: Check format
-        uses: actions-rust-lang/rustfmt@v1
-        with:
-          manifest-path: ./counter
 
 
   # Run the tests on all supported OSes and Rust versions (main CI)
@@ -130,7 +129,7 @@ jobs:
         run: cargo test
 
       - name: Check that benchmarks build
-        run: cargo build --benches(
+        run: cargo build --benches
 
   deploy-book:
     # Don't run on a schedule, book doesn't change on its own.
