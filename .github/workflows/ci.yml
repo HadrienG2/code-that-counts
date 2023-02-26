@@ -71,9 +71,6 @@ jobs:
           toolchain: nightly
           components: rustfmt,clippy
 
-      - name: Go to code directory
-        run: cd counter
-
       - name: Check format
         uses: actions-rust-lang/rustfmt@v1
         with:
@@ -100,7 +97,7 @@ jobs:
           - macos-latest
         rustflags:
           - "-D warnings"
-          - "-D warnings -C target-cpu = native"
+          - "-D warnings -C target-cpu=native"
         rust:
           - stable
           - 1.60.0  # Minimum supported Rust version
@@ -165,7 +162,7 @@ jobs:
           - macos-latest
         rustflags:
           - "-D warnings"
-          - "-D warnings -C target-cpu = native"
+          - "-D warnings -C target-cpu=native"
         rust:
           - beta
           - nightly
