@@ -39,6 +39,12 @@ jobs:
       - name: Render the book
         run: mkdir public && mdbook build -d public
 
+      - name: Upload the book
+        uses: actions/upload-artifact@v3
+        with:
+          name: book
+          path: ./public
+
   # Auto-format, clippy and rustc lints do not depend on the operating system
   # and only need to be tested on the latest supported release of each CI run.
   # We don't care about warnings on the minimum supported Rust version, only
@@ -145,7 +151,12 @@ jobs:
     needs: ["render-book", "lints", "test-contrib"]
 
     steps:
-      - name: Upload artifact
+      - name: Download the book
+        uses: actions/download-artifact@v3
+        with:
+          name: book
+
+      - name: Upload book to github pages
         uses: actions/upload-pages-artifact@v1
         with:
           path: ./public
