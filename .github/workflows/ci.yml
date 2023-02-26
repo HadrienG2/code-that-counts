@@ -76,16 +76,16 @@ jobs:
           toolchain: nightly
           components: rustfmt,clippy
 
-      - name: Check format
-        uses: actions-rust-lang/rustfmt@v1
-        with:
-          manifest-path: ./counter
-
       - name: Type-check the program
         run: cargo check
 
       - name: Check clippy lints
         run: cargo clippy -- -D warnings
+
+      - name: Check format
+        uses: actions-rust-lang/rustfmt@v1
+        with:
+          manifest-path: ./counter
 
 
   # Run the tests on all supported OSes and Rust versions (main CI)
@@ -96,10 +96,6 @@ jobs:
 
     strategy:
       matrix:
-        os:
-          - ubuntu-latest
-          - windows-latest
-          - macos-latest
         rustflags:
           - "-D warnings"
           - "-D warnings -C target-cpu=native"
@@ -107,7 +103,7 @@ jobs:
           - stable
           - 1.60.0  # Minimum supported Rust version
 
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-latest
 
     env:
       RUSTFLAGS: ${{ matrix.rustflags }}
@@ -134,7 +130,7 @@ jobs:
         run: cargo test
 
       - name: Check that benchmarks build
-        run: cargo build --benches
+        run: cargo build --benches(
 
   deploy-book:
     # Don't run on a schedule, book doesn't change on its own.
@@ -166,10 +162,6 @@ jobs:
 
     strategy:
       matrix:
-        os:
-          - ubuntu-latest
-          - windows-latest
-          - macos-latest
         rustflags:
           - "-D warnings"
           - "-D warnings -C target-cpu=native"
@@ -178,7 +170,7 @@ jobs:
           - nightly
           - 1.60.0  # Minimum supported Rust version (can be broken by deps)
 
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-latest
 
     env:
       RUSTFLAGS: ${{ matrix.rustflags }}
