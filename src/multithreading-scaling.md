@@ -17,7 +17,7 @@ What have I been doing wrong from a scalability perspective so far?
       scalable synchronization protocol would instead allow threads to
       synchronize in parallel. This is done by using N-ary reduction trees,
       where threads start to synchronize in groups of N, then the group results
-      are themselves synchronized in groups of N, and so one until a fully
+      are themselves synchronized in groups of N, and so on until a fully
       merged result is produced.
     * Cache coherence is implemented by physically transferring data from the
       L1 cache of one CPU core to that of another core through an interconnect
