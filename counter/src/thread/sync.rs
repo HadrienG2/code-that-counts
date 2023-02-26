@@ -1,4 +1,4 @@
-use super::pool::{JobScheduler, Stopped};
+use super::pool::{Done, JobScheduler, Stopped};
 
 // ANCHOR: FutexScheduler
 pub struct FutexScheduler {
@@ -103,7 +103,7 @@ impl JobScheduler for FutexScheduler {
     fn wait_for_started(&self) {
         // No need to handle the stop signal at this stage, it will be caught
         // on the next call to wait_for_task().
-        std::mem::drop(self.faillible_spin_wait(|| self.no_task()));
+        self.faillible_spin_wait(|| self.no_task()).unwrap_or(Done);
     }
 }
 //

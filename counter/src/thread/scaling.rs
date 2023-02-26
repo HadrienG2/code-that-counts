@@ -188,7 +188,7 @@ impl<R: Default + Reducer<AccumulatorId = ()>> ReductionTree<R> {
 
         // Bind our children to nodes of the newly created reduction subtree
         for (child, parent_idx) in children.iter_mut().zip(children_slots) {
-            child.set_parent(self, threads, parent_idx);
+            child.set_parent(self, &mut *threads, parent_idx);
         }
 
         // Expose the root node as our only direct child
@@ -212,7 +212,7 @@ impl<R: Default + Reducer<AccumulatorId = ()>> ReductionTree<R> {
             children.push(ReducedChild::Thread(threads.len()));
             threads.push(ThreadConfig::new(cpu));
         }
-        return children;
+        children
     }
 
     /// Set up a subtree of ReductionNodes to reduce results from N children
@@ -387,13 +387,14 @@ impl<R: Default + Reducer<AccumulatorId = ()>> ReductionTree<R> {
         &self,
         topology: &hwloc2::Topology,
         max_arity: u32,
-        threads: &Vec<ThreadConfig<usize>>,
+        threads: impl AsRef<[ThreadConfig<usize>]>,
     ) {
+        let threads = threads.as_ref();
         let mut children = vec![vec![]; self.nodes.len()];
         let mut full_cpuset = hwloc2::CpuSet::new();
 
         // Check that ThreadConfigs follow expectations
-        for (idx, thread) in threads.into_iter().enumerate() {
+        for (idx, thread) in threads.iter().enumerate() {
             // Check that each thread targets a single, unique CPU
             assert_eq!(thread.cpuset.weight(), 1);
             let cpu = u32::try_from(thread.cpuset.first()).unwrap();
@@ -439,7 +440,6 @@ impl<R: Default + Reducer<AccumulatorId = ()>> ReductionTree<R> {
         // Traverse the tree from the root, make sure all nodes are reachable,
         // and measure the tree depth along the way.
         // TODO: Couple this with a check that hwloc topology is honored?
-        //       Essentially, the goal is to check that
         let mut reached = 0;
         let mut depth = 0;
         let mut next_nodes = vec![root_idx];
@@ -448,9 +448,8 @@ impl<R: Default + Reducer<AccumulatorId = ()>> ReductionTree<R> {
             for next_node in std::mem::take(&mut next_nodes) {
                 reached += 1;
                 for child in children[next_node].iter().copied() {
-                    match child {
-                        ReducedChild::Node(idx) => next_nodes.push(idx),
-                        _ => {}
+                    if let ReducedChild::Node(idx) = child {
+                        next_nodes.push(idx)
                     }
                 }
             }
@@ -623,12 +622,12 @@ impl ReducedChild {
     fn set_parent<R>(
         &self,
         tree: &mut ReductionTree<R>,
-        threads: &mut Vec<ThreadConfig<NullableIdx>>,
+        mut threads: impl AsMut<[ThreadConfig<NullableIdx>]>,
         parent_idx: usize,
     ) {
         match self {
             Self::Thread(idx) => {
-                threads[*idx].accumulator_id = NullableIdx::some(parent_idx);
+                threads.as_mut()[*idx].accumulator_id = NullableIdx::some(parent_idx);
             }
             Self::Node(idx) => {
                 tree.nodes[*idx].parent_idx = NullableIdx::some(parent_idx);
