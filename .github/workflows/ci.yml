@@ -1,0 +1,179 @@
+# There are two kinds of continuous integration jobs in this project:
+#
+# - Every code submission or master push passes continuous integration on the
+#   minimal supported Rust version and the current stable Rust version.
+# - Two times a month, a scheduled job makes sure that the code remains
+#   compatible and lint-free on upcoming Rust toolchains (beta and nightly).
+
+on:
+  push:
+  pull_request:
+  schedule:
+    - cron: '0 0 2,16 * *'
+
+name: Continuous Integration
+
+env:
+  RUSTFLAGS: -D warnings
+
+jobs:
+  # Render the bool
+  render-book:
+    # Don't run on a schedule, book doesn't change on its own.
+    # Only run on "pull_request" event for external PRs. This is to avoid
+    # duplicate builds for PRs created from internal branches.
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name != github.repository
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v3
+
+      - name: Set up stable toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+
+      - name: Install mdbook
+        run: cargo install mdbook
+
+      - name: Render the book
+        run: mkdir public && mdbook build -d public
+
+  # Auto-format, clippy and rustc lints do not depend on the operating system
+  # and only need to be tested on the latest supported release of each CI run.
+  # We don't care about warnings on the minimum supported Rust version, only
+  # about building and running correctly.
+  lints:
+    # Only run on "pull_request" event for external PRs. This is to avoid
+    # duplicate builds for PRs created from internal branches.
+    if: github.event_name == 'push' || github.event_name == 'schedule' || github.event.pull_request.head.repo.full_name != github.repository
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v3
+
+      - name: Set up stable toolchain
+        if: github.event_name != 'schedule'
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          components: rustfmt,clippy
+
+      - name: Set up nightly toolchain
+        if: github.event_name == 'schedule'
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: nightly
+          components: rustfmt,clippy
+
+      - name: Check format
+        uses: actions-rust-lang/rustfmt@v1
+
+      - name: Type-check the program
+        run: cargo check
+
+      - name: Check clippy lints
+        run: cargo clippy -- -D warnings
+
+
+  # Run the tests on all supported OSes and Rust versions (main CI)
+  test-contrib:
+    # Only run on "pull_request" event for external PRs. This is to avoid
+    # duplicate builds for PRs created from internal branches.
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name != github.repository
+
+    strategy:
+      matrix:
+        os:
+          - ubuntu-latest
+          - windows-latest
+          - macos-latest
+        rustflags:
+          - "-D warnings"
+          - "-D warnings -C target-cpu = native"
+        rust:
+          - stable
+          - 1.60.0  # Minimum supported Rust version
+
+    runs-on: ${{ matrix.os }}
+
+    env:
+      RUSTFLAGS: ${{ matrix.rustflags }}
+
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v3
+
+      - name: Set up toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: ${{ matrix.rust }}
+
+      - name: Run tests
+        run: cargo test
+
+      - name: Check that benchmarks build
+        run: cargo build --benches
+
+  deploy-book:
+    # Don't run on a schedule, book doesn't change on its own.
+    # Only run on "pull_request" event for external PRs. This is to avoid
+    # duplicate builds for PRs created from internal branches.
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name != github.repository
+
+    runs-on: ubuntu-latest
+
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    needs: ["render-book", "lints", "test-contrib"]
+
+    steps:
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v1
+        with:
+          path: ./public
+
+  # Check compatibility with newer Rust/deps versions (scheduled CI)
+  #
+  # FIXME: There should be a way to use conditional build matrices without
+  #        duplicating the whole job recipe...
+  #
+  test-scheduled:
+    if: github.event_name == 'schedule'
+
+    strategy:
+      matrix:
+        os:
+          - ubuntu-latest
+          - windows-latest
+          - macos-latest
+        rustflags:
+          - "-D warnings"
+          - "-D warnings -C target-cpu = native"
+        rust:
+          - beta
+          - nightly
+          - 1.60.0  # Minimum supported Rust version (can be broken by deps)
+
+    runs-on: ${{ matrix.os }}
+
+    env:
+      RUSTFLAGS: ${{ matrix.rustflags }}
+
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v3
+
+      - name: Set up toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: ${{ matrix.rust }}
+
+      - name: Run tests
+        run: cargo test
+
+      - name: Check that benchmarks build
+        run: cargo build --benches
