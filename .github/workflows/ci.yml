@@ -58,8 +58,10 @@ jobs:
       - name: Checkout sources
         uses: actions/checkout@v3
 
-      - name: Install hwloc
-        run: apt install libhwloc-dev
+      - uses: awalsh128/cache-apt-pkgs-action@latest
+        with:
+          version: 1.0
+          packages: libhwloc-dev
 
       - name: Set up stable toolchain
         if: github.event_name != 'schedule'
@@ -118,8 +120,10 @@ jobs:
       - name: Checkout sources
         uses: actions/checkout@v3
 
-      - name: Install hwloc
-        run: apt install libhwloc-dev
+      - uses: awalsh128/cache-apt-pkgs-action@latest
+        with:
+          version: 1.0
+          packages: libhwloc-dev
 
       - name: Set up toolchain
         uses: actions-rust-lang/setup-rust-toolchain@v1
@@ -187,8 +191,10 @@ jobs:
       - name: Checkout sources
         uses: actions/checkout@v3
 
-      - name: Install hwloc
-        run: apt install libhwloc-dev
+      - uses: awalsh128/cache-apt-pkgs-action@latest
+        with:
+          version: 1.0
+          packages: libhwloc-dev
 
       - name: Set up toolchain
         uses: actions-rust-lang/setup-rust-toolchain@v1
