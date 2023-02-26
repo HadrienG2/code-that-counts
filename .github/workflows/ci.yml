@@ -77,7 +77,6 @@ jobs:
           components: rustfmt,clippy
 
       - name: Check code formatting
-        uses: actions-rust-lang/rustfmt@v1
         run: cargo fmt -- --check
 
       - name: Type-check the program
