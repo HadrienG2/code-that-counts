@@ -19,7 +19,7 @@ hwloc2 = "2.2"
 num-traits = "0.2"
 pessimize = { git = "https://github.com/HadrienG2/pessimize.git", features = ["safe_arch"] }
 rayon = "1.7"
-safe_arch = "0.6"
+safe_arch = "0.7"
 
 [dev-dependencies]
 criterion = { version = "0.4", default-features = false, features = ["rayon", "cargo_bench_support"] }
