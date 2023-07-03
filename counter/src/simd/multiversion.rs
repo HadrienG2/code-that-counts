@@ -16,12 +16,12 @@ pub fn multiversion_sse2(target: u64) -> u64 {
 // ANCHOR: avx2
 #[cfg(target_feature = "avx2")]
 impl SimdAccumulator<u64> for safe_arch::m256i {
-    #[inline(always)]
+    #[inline]
     fn identity(one: bool) -> Self {
         Self::from([one as u64; <Self as SimdAccumulator<u64>>::WIDTH])
     }
 
-    #[inline(always)]
+    #[inline]
     fn add(self, other: Self) -> Self {
         safe_arch::add_i64_m256i(self, other)
     }
@@ -30,7 +30,7 @@ impl SimdAccumulator<u64> for safe_arch::m256i {
     type ReducedCounter = u64;
     type ReducedAccumulator = safe_arch::m128i;
     //
-    #[inline(always)]
+    #[inline]
     fn reduce_step(self) -> [Self::ReducedAccumulator; 2] {
         [
             safe_arch::extract_m128i_m256i::<0>(self),

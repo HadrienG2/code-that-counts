@@ -3,12 +3,12 @@ use super::SimdAccumulator;
 // ANCHOR: narrow_SimdAccumulator
 #[cfg(target_feature = "avx2")]
 impl SimdAccumulator<u8> for safe_arch::m256i {
-    #[inline(always)]
+    #[inline]
     fn identity(one: bool) -> Self {
         Self::from([one as u8; <Self as SimdAccumulator<u8>>::WIDTH])
     }
 
-    #[inline(always)]
+    #[inline]
     fn add(self, other: Self) -> Self {
         safe_arch::add_i8_m256i(self, other)
     }
@@ -17,7 +17,7 @@ impl SimdAccumulator<u8> for safe_arch::m256i {
     type ReducedCounter = u16;
     type ReducedAccumulator = safe_arch::m256i;
     //
-    #[inline(always)]
+    #[inline]
     fn reduce_step(self) -> [Self::ReducedAccumulator; 2] {
         use safe_arch::m256i;
         fn extract_u16_m256i_from_u8_m256i<const LANE: i32>(u8s: m256i) -> m256i {
@@ -33,12 +33,12 @@ impl SimdAccumulator<u8> for safe_arch::m256i {
 
 #[cfg(target_feature = "avx2")]
 impl SimdAccumulator<u16> for safe_arch::m256i {
-    #[inline(always)]
+    #[inline]
     fn identity(one: bool) -> Self {
         Self::from([one as u16; <Self as SimdAccumulator<u16>>::WIDTH])
     }
 
-    #[inline(always)]
+    #[inline]
     fn add(self, other: Self) -> Self {
         safe_arch::add_i16_m256i(self, other)
     }
@@ -47,7 +47,7 @@ impl SimdAccumulator<u16> for safe_arch::m256i {
     type ReducedCounter = u32;
     type ReducedAccumulator = safe_arch::m256i;
     //
-    #[inline(always)]
+    #[inline]
     fn reduce_step(self) -> [Self::ReducedAccumulator; 2] {
         use safe_arch::m256i;
         fn extract_u32_m256i_from_u16_m256i<const LANE: i32>(u16s: m256i) -> m256i {
@@ -63,12 +63,12 @@ impl SimdAccumulator<u16> for safe_arch::m256i {
 
 #[cfg(target_feature = "avx2")]
 impl SimdAccumulator<u32> for safe_arch::m256i {
-    #[inline(always)]
+    #[inline]
     fn identity(one: bool) -> Self {
         Self::from([one as u32; <Self as SimdAccumulator<u32>>::WIDTH])
     }
 
-    #[inline(always)]
+    #[inline]
     fn add(self, other: Self) -> Self {
         safe_arch::add_i32_m256i(self, other)
     }
@@ -77,7 +77,7 @@ impl SimdAccumulator<u32> for safe_arch::m256i {
     type ReducedCounter = u64;
     type ReducedAccumulator = safe_arch::m256i;
     //
-    #[inline(always)]
+    #[inline]
     fn reduce_step(self) -> [Self::ReducedAccumulator; 2] {
         use safe_arch::m256i;
         fn extract_u64_m256i_from_u32_m256i<const LANE: i32>(u16s: m256i) -> m256i {
@@ -207,7 +207,7 @@ impl<
     }
 
     /// Increment counters
-    #[inline(always)]
+    #[inline]
     pub fn increment(&mut self) {
         // Perfom a 8-bit increment
         for simd_u8 in &mut self.simd_u8s {
@@ -237,7 +237,7 @@ impl<
     }
 
     /// Spill 8-bit SIMD accumulators into matching 16-bit ones
-    #[inline(always)]
+    #[inline]
     fn spill_u8s_to_u16s(&mut self) {
         for (simd_u8, simd_u16) in self.simd_u8s.iter_mut().zip(self.simd_u16s.iter_mut()) {
             fn spill_one<SimdU8, SimdU16>(simd_u8: &mut SimdU8, simd_u16: &mut SimdU16)
@@ -255,7 +255,7 @@ impl<
     }
 
     /// Spill 16-bit SIMD accumulators into matching scalar ones
-    #[inline(always)]
+    #[inline]
     fn spill_u16s_to_scalars(&mut self) {
         for (simd_u16, scalar) in self.simd_u16s.iter_mut().zip(self.scalars.iter_mut()) {
             fn spill_one<SimdU16: SimdAccumulator<u16>>(simd_u16: &mut SimdU16, scalar: &mut u64) {

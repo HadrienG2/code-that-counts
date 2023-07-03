@@ -13,13 +13,13 @@ pub trait SimdAccumulator<Counter>: Copy + Eq + pessimize::Pessimize + Sized {
     fn identity(one: bool) -> Self;
 
     /// Set up accumulators initialized to 0
-    #[inline(always)]
+    #[inline]
     fn zeros() -> Self {
         Self::identity(false)
     }
 
     /// Set up accumulators initialized to 1
-    #[inline(always)]
+    #[inline]
     fn ones() -> Self {
         Self::identity(true)
     }
@@ -29,13 +29,13 @@ pub trait SimdAccumulator<Counter>: Copy + Eq + pessimize::Pessimize + Sized {
 
     /// Add one to every accumulator in the set in a manner that cannot be
     /// optimized out by the compiler
-    #[inline(always)]
+    #[inline]
     fn increment(&mut self) {
         *self = pessimize::hide(Self::add(*self, Self::ones()));
     }
 
     /// Merge another accumulator into this one
-    #[inline(always)]
+    #[inline]
     fn merge(&mut self, other: Self) {
         *self = Self::add(*self, other);
     }
@@ -52,7 +52,7 @@ pub trait SimdAccumulator<Counter>: Copy + Eq + pessimize::Pessimize + Sized {
 
     /// Reduce all the way to a 64-bit counter
     /// Must be specialized to the identity function for u64 scalars
-    #[inline(always)]
+    #[inline]
     fn reduce(self) -> u64 {
         let [mut half, half2] = self.reduce_step();
         half.merge(half2);
@@ -64,12 +64,12 @@ pub trait SimdAccumulator<Counter>: Copy + Eq + pessimize::Pessimize + Sized {
 #[cfg(target_feature = "sse2")]
 // ANCHOR: implAccumulator
 impl SimdAccumulator<u64> for safe_arch::m128i {
-    #[inline(always)]
+    #[inline]
     fn identity(one: bool) -> Self {
         Self::from([one as u64; <Self as SimdAccumulator<u64>>::WIDTH])
     }
 
-    #[inline(always)]
+    #[inline]
     fn add(self, other: Self) -> Self {
         safe_arch::add_i64_m128i(self, other)
     }
@@ -78,19 +78,19 @@ impl SimdAccumulator<u64> for safe_arch::m128i {
     type ReducedCounter = u64;
     type ReducedAccumulator = u64;
     //
-    #[inline(always)]
+    #[inline]
     fn reduce_step(self) -> [Self::ReducedAccumulator; 2] {
         self.into()
     }
 }
 
 impl SimdAccumulator<u64> for u64 {
-    #[inline(always)]
+    #[inline]
     fn identity(one: bool) -> Self {
         one as u64
     }
 
-    #[inline(always)]
+    #[inline]
     fn add(self, other: Self) -> Self {
         self + other
     }
@@ -99,12 +99,12 @@ impl SimdAccumulator<u64> for u64 {
     type ReducedCounter = u64;
     type ReducedAccumulator = u64;
     //
-    #[inline(always)]
+    #[inline]
     fn reduce_step(self) -> [Self::ReducedAccumulator; 2] {
         [self, 0]
     }
     //
-    #[inline(always)]
+    #[inline]
     fn reduce(self) -> u64 {
         self
     }
