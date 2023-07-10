@@ -463,7 +463,7 @@ checksum = "0ab1bc2a289d34bd04a330323ac98a1b4bc82c9d9fcb1e66b63caa84da26b575"
 [[package]]
 name = "pessimize"
 version = "0.1.0"
-source = "git+https://github.com/HadrienG2/pessimize.git#084098215cfcdd7c3e4d006eee3d94539101434f"
+source = "git+https://github.com/HadrienG2/pessimize.git#70b8c57a9133446b4bd3e024ae2037600869274a"
 dependencies = [
  "safe_arch",
 ]
