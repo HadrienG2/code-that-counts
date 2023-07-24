@@ -152,7 +152,9 @@ impl<R: Default + Reducer<AccumulatorId = ()>> ReductionTree<R> {
         debug_assert!(max_arity >= Self::MIN_ARITY);
 
         // Ignore objects with no CPUs attached
-        let Some(object_cpuset) = object.cpuset() else { return Vec::new() };
+        let Some(object_cpuset) = object.cpuset() else {
+            return Vec::new();
+        };
 
         // Upon reaching a leaf hwloc object, emit a list of leaf CPU threads
         let Some(first_child) = object.first_child() else {

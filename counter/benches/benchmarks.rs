@@ -379,7 +379,9 @@ enum CpusetAlgorithm {
 /// Count physical CPU cores below a certain Topology node
 fn physical_cpus(object: &TopologyObject) -> u32 {
     // Discard non-CPU resources
-    let Some(cpuset) = object.cpuset() else { return 0; };
+    let Some(cpuset) = object.cpuset() else {
+        return 0;
+    };
 
     // Ignore hyperthreads within cores if given the opportunity
     if object.object_type() == ObjectType::Core {
@@ -387,7 +389,9 @@ fn physical_cpus(object: &TopologyObject) -> u32 {
     }
 
     // Terminate recursion on leaf nodes
-    let Some(mut child) = object.first_child() else { return cpuset.weight() as u32 };
+    let Some(mut child) = object.first_child() else {
+        return cpuset.weight() as u32;
+    };
 
     // On non-leaf nodes, recurse through children
     let mut result = physical_cpus(child);
