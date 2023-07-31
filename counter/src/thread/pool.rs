@@ -390,7 +390,7 @@ impl<'aggregator> ReducerGuard<'aggregator> {
     /// Note that this is unlike the fetch_xyz functions of Atomic variables,
     /// which return the _previous_ value of the variable.
     ///
-    fn fetch_update<T: Copy>(
+    fn fetch_update<T: bytemuck::NoUninit>(
         &mut self,
         target: &atomic::Atomic<T>,
         order: atomic::Ordering,
