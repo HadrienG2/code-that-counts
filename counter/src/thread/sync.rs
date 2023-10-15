@@ -125,10 +125,8 @@ impl FutexScheduler {
 #[cfg(test)]
 mod tests {
     use super::FutexScheduler;
-    use crate::{test_utils, thread::pool::BasicThreadPool};
+    use crate::thread::pool::BasicThreadPool;
     use once_cell::sync::Lazy;
-    use quickcheck::TestResult;
-    use quickcheck_macros::quickcheck;
     use std::{panic::RefUnwindSafe, sync::Mutex};
 
     type CounterBox = Box<dyn Fn(u64) -> u64 + RefUnwindSafe + Send + Sync + 'static>;
@@ -140,9 +138,7 @@ mod tests {
             ))
         });
 
-    #[quickcheck]
-    fn thread_futex(target: u32) -> TestResult {
-        let mut lock = BKG_THREADS_FUTEX.lock().unwrap();
-        test_utils::test_counter_impl(target, |target| lock.count(target))
-    }
+    crate::test_counter!((thread_futex, |target| {
+        BKG_THREADS_FUTEX.lock().unwrap().count(target)
+    }));
 }
