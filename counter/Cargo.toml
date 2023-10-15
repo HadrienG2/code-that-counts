@@ -25,5 +25,13 @@ safe_arch = "0.7"
 [dev-dependencies]
 criterion = { version = "0.5", default-features = false, features = ["rayon", "cargo_bench_support"] }
 once_cell = "1.18"
-quickcheck = "1"
-quickcheck_macros = "1"
+proptest = "1.3"
+
+[profile.test]
+opt-level = 1
+
+[profile.test.package.proptest]
+opt-level = 3
+
+[profile.test.package.rand_chacha]
+opt-level = 3

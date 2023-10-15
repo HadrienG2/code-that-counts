@@ -6,18 +6,10 @@ pub mod thread;
 /// Tools used to test the various implementations
 #[cfg(test)]
 pub(crate) mod test_utils {
-    use quickcheck::TestResult;
+    /// Put a limit on how high we count to keep test durations in check
+    pub(crate) const MAX_TARGET: u64 = 1 << 24;
 
-    /// Test a counter implementation by counting up to `target`
-    pub fn test_counter_impl(target: u32, mut counter: impl FnMut(u64) -> u64) -> TestResult {
-        if target > 1 << 24 {
-            return TestResult::discard();
-        }
-        let target = target as u64;
-        TestResult::from_bool(counter(target) == target)
-    }
-
-    /// Shorthand to generate a quickcheck test based on `test_counter_impl`
+    /// Shorthand to generate a proptest for a certain counter implementation
     ///
     /// If your counter implementation is a simple function, you can just do
     /// `test_counter!(my_counter)` and it will generate a test with the same
@@ -34,9 +26,12 @@ pub(crate) mod test_utils {
             $crate::test_counter!(($name, super::$name));
         };
         (($name:ident, $imp:expr)) => {
-            #[quickcheck_macros::quickcheck]
-            fn $name(target: u32) -> quickcheck::TestResult {
-                $crate::test_utils::test_counter_impl(target, $imp)
+            proptest::proptest! {
+                #[allow(clippy::redundant_closure_call)]
+                #[test]
+                fn $name(target in 0..$crate::test_utils::MAX_TARGET) {
+                    proptest::prop_assert_eq!(($imp)(target), target);
+                }
             }
         };
     }
