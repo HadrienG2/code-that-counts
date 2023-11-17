@@ -152,7 +152,7 @@ jobs:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
 
-    needs: ["render-book", "lints", "test-contrib"]
+    needs: ["render-book", "format-lints", "test-contrib"]
 
     # Grant GITHUB_TOKEN the permissions required to make a Pages deployment
     permissions:
