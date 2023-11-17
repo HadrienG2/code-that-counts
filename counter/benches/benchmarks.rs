@@ -86,8 +86,7 @@ pub fn criterion_benchmark(c: &mut Criterion) {
 /// Construct benchmark set
 fn benchmarks() -> Vec<(&'static str, Benchmark)> {
     let mut benchmarks = Vec::new();
-    let add_benchmarks = |output: &mut Vec<(&'static str, Benchmark)>,
-                          input: &[(&'static str, fn(u64) -> u64)]| {
+    let add_benchmarks = |output: &mut Vec<(&'static str, Benchmark)>, input: &[NamedCounter]| {
         output.extend(
             input
                 .iter()
@@ -246,6 +245,8 @@ fn benchmarks() -> Vec<(&'static str, Benchmark)> {
     }
     benchmarks
 }
+//
+type NamedCounter = (&'static str, fn(u64) -> u64);
 //
 #[allow(dead_code)]
 enum Benchmark {
