@@ -126,19 +126,25 @@ impl FutexScheduler {
 mod tests {
     use super::FutexScheduler;
     use crate::thread::pool::BasicThreadPool;
-    use once_cell::sync::Lazy;
-    use std::{panic::RefUnwindSafe, sync::Mutex};
+    use std::{
+        panic::RefUnwindSafe,
+        sync::{Mutex, OnceLock},
+    };
 
     type CounterBox = Box<dyn Fn(u64) -> u64 + RefUnwindSafe + Send + Sync + 'static>;
-    static BKG_THREADS_FUTEX: Lazy<Mutex<BasicThreadPool<CounterBox, FutexScheduler>>> =
-        Lazy::new(|| {
-            Mutex::new(BasicThreadPool::start(
-                Box::new(crate::simd::multiversion::multiversion_avx2) as _,
-                FutexScheduler::new,
-            ))
-        });
+    static BKG_THREADS_FUTEX: OnceLock<Mutex<BasicThreadPool<CounterBox, FutexScheduler>>> =
+        OnceLock::new();
 
     crate::test_counter!((thread_futex, |target| {
-        BKG_THREADS_FUTEX.lock().unwrap().count(target)
+        BKG_THREADS_FUTEX
+            .get_or_init(|| {
+                Mutex::new(BasicThreadPool::start(
+                    Box::new(crate::simd::multiversion::multiversion_avx2) as _,
+                    FutexScheduler::new,
+                ))
+            })
+            .lock()
+            .unwrap()
+            .count(target)
     }));
 }
