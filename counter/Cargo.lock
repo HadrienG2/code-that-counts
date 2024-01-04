@@ -165,7 +165,6 @@ dependencies = [
  "crossbeam-utils",
  "hwloc2",
  "num-traits",
- "once_cell",
  "pessimize",
  "proptest",
  "rayon",

@@ -642,19 +642,25 @@ impl<
 #[cfg(test)]
 mod tests {
     use super::{BasicScheduler, BasicThreadPool};
-    use once_cell::sync::Lazy;
-    use std::{panic::RefUnwindSafe, sync::Mutex};
+    use std::{
+        panic::RefUnwindSafe,
+        sync::{Mutex, OnceLock},
+    };
 
     type CounterBox = Box<dyn Fn(u64) -> u64 + RefUnwindSafe + Send + Sync + 'static>;
-    static BKG_THREADS_BASIC: Lazy<Mutex<BasicThreadPool<CounterBox, BasicScheduler>>> =
-        Lazy::new(|| {
-            Mutex::new(BasicThreadPool::start(
-                Box::new(crate::simd::multiversion::multiversion_avx2) as _,
-                BasicScheduler::new,
-            ))
-        });
+    static BKG_THREADS_BASIC: OnceLock<Mutex<BasicThreadPool<CounterBox, BasicScheduler>>> =
+        OnceLock::new();
 
     crate::test_counter!((thread_pool, |target| {
-        BKG_THREADS_BASIC.lock().unwrap().count(target)
+        BKG_THREADS_BASIC
+            .get_or_init(|| {
+                Mutex::new(BasicThreadPool::start(
+                    Box::new(crate::simd::multiversion::multiversion_avx2) as _,
+                    BasicScheduler::new,
+                ))
+            })
+            .lock()
+            .unwrap()
+            .count(target)
     }));
 }
