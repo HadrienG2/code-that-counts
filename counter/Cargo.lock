@@ -230,12 +230,9 @@ dependencies = [
 
 [[package]]
 name = "crossbeam-utils"
-version = "0.8.18"
+version = "0.8.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c3a430a770ebd84726f584a90ee7f020d28db52c6d02138900f22341f866d39c"
-dependencies = [
- "cfg-if",
-]
+checksum = "248e3bacc7dc6baa3b21e405ee045c3047101a49145e7e9eca583ab4c2ca5345"
 
 [[package]]
 name = "either"
@@ -446,8 +443,9 @@ checksum = "0ab1bc2a289d34bd04a330323ac98a1b4bc82c9d9fcb1e66b63caa84da26b575"
 
 [[package]]
 name = "pessimize"
-version = "0.1.0"
-source = "git+https://github.com/HadrienG2/pessimize.git#70b8c57a9133446b4bd3e024ae2037600869274a"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3cdf27988806d449947ea7b4c99298e26b37cb4940e79326c224b4156af17879"
 dependencies = [
  "safe_arch",
 ]
