@@ -24,6 +24,16 @@ env:
   MINIMAL_RUST: 1.70.0  # Minimal Supported Rust Version
 
 jobs:
+  # Workaround for github CI dropping env var expansion in matrix strategy
+  matrix_vars:
+    runs-on: ubuntu-latest
+    outputs:
+      MINIMAL_RUST: ${{ env.MINIMAL_RUST }}
+    steps:
+      - name: Forward env var to output
+        run: echo "MINIMAL_RUST=${{ env.MINIMAL_RUST }}" >> $GITHUB_OUTPUT
+
+
   # Render the book
   render-book:
     # Don't run CI twice when a PR is created from a branch internal to the repo
@@ -102,6 +112,10 @@ jobs:
     # Don't run in scheduled jobs, that's what test-scheduled is for
     if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name != github.repository
 
+    runs-on: ubuntu-latest
+
+    needs: matrix_vars
+
     strategy:
       matrix:
         target-flags:
@@ -109,9 +123,7 @@ jobs:
           - "-C target-cpu=native"
         rust:
           - stable
-          - $MINIMAL_RUST  # Minimum supported Rust version
-
-    runs-on: ubuntu-latest
+          - ${{ needs.matrix_vars.outputs.MINIMAL_RUST }}
 
     env:
       RUSTFLAGS: "-D warnings ${{ matrix.target-flags }}"
@@ -187,6 +199,10 @@ jobs:
   test-scheduled:
     if: github.event_name == 'schedule'
 
+    runs-on: ubuntu-latest
+
+    needs: matrix_vars
+
     strategy:
       matrix:
         rustflags:
@@ -195,9 +211,7 @@ jobs:
         rust:
           - beta
           - nightly
-          - $MINIMAL_RUST  # Compatibility can be broken by deps updates
-
-    runs-on: ubuntu-latest
+          - ${{ needs.matrix_vars.outputs.MINIMAL_RUST }}
 
     env:
       RUSTFLAGS: ${{ matrix.rustflags }}
