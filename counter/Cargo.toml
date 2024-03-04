@@ -19,7 +19,7 @@ crossbeam-utils = "0.8"
 hwloc2 = "2.2"
 num-traits = "0.2"
 pessimize = { version = "1.0", features = ["safe_arch"] }
-rayon = "1.8"
+rayon = "1.9"
 safe_arch = "0.7"
 
 [dev-dependencies]
