@@ -12,6 +12,6 @@ extra-watch-dirs = ["counter/src", "counter/benches"]
 edition = "2021"
 
 [output.html]
-curly-quotes = true
+smart-punctuation = true
 git-repository-url = "https://github.com/HadrienG2/code-that-counts"
 edit-url-template = "https://github.com/HadrienG2/code-that-counts/edit/master/{path}"

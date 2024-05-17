@@ -22,6 +22,7 @@ env:
   RUSTFLAGS: -D warnings
   RUSTDOCFLAGS: -D warnings
   MINIMAL_RUST: 1.70.0  # Minimal Supported Rust Version
+  MDBOOK_VERSION: 0.4.40
 
 jobs:
   # Workaround for github CI dropping env var expansion in matrix strategy
@@ -49,7 +50,7 @@ jobs:
       - name: Install mdbook
         run: |
           mkdir bin
-          curl -sSL https://github.com/rust-lang/mdBook/releases/download/v0.4.27/mdbook-v0.4.27-x86_64-unknown-linux-gnu.tar.gz | tar -xz --directory=bin
+          curl -sSL https://github.com/rust-lang/mdBook/releases/download/v${MDBOOK_VERSION}/mdbook-v${MDBOOK_VERSION}-x86_64-unknown-linux-gnu.tar.gz | tar -xz --directory=bin
           echo "$(pwd)/bin" >> ${GITHUB_PATH}
 
       - name: Render the book
