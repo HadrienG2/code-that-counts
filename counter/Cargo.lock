@@ -443,9 +443,9 @@ checksum = "0ab1bc2a289d34bd04a330323ac98a1b4bc82c9d9fcb1e66b63caa84da26b575"
 
 [[package]]
 name = "pessimize"
-version = "1.0.0"
+version = "2.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3cdf27988806d449947ea7b4c99298e26b37cb4940e79326c224b4156af17879"
+checksum = "3bac25548a8d4f7b6dd7f3ee1d4d93817f030a7a6a532026992ecd4b9e2cd242"
 dependencies = [
  "safe_arch",
 ]
