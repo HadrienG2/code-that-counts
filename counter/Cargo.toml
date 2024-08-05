@@ -14,7 +14,7 @@ harness = false
 [dependencies]
 atomic = { version = "0.6", default-features = false }
 atomic-wait = "1.1"
-bytemuck = "1.16.1"
+bytemuck = "1.16.3"
 crossbeam-utils = "0.8"
 hwloc2 = "2.2"
 num-traits = "0.2"
